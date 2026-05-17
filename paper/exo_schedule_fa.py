@@ -67,6 +67,7 @@ from exo.platforms.saturn_rvv import (
     vfexp_v,
     saturn_bf16_widen_f32_m2,        # Mo 8 step 2b: BF16->FP32 widen (vzext+vsll)
     saturn_vfmacc_vv_f32m2,          # Mo 8 step 2b: FP32 vector vfmacc
+    saturn_vfmacc_vf_f32m2,          # Mo 8 step 4a: FP32 vector += scalar-broadcast * vector
     saturn_vfsub_vf_f32m2,           # Mo 8 step 2c: vec - DRAM-scalar broadcast
     saturn_f32_narrow_bf16_m2,       # Mo 8 step 2c: FP32 -> BF16 truncating narrow
     saturn_vfredmax_to_dram_f32m2,   # Mo 8 step 2c: max-reduce to DRAM scalar
@@ -623,6 +624,60 @@ def schedule_pv_chunk(p=pv_chunk_naive, verbose=False):
     return p
 
 
+# --- 2g. Mo 8 step 4a: pv_macc_chunk — proper FA P·V structure ------------
+#
+#  Step 4a's purpose is to close a structural gap surfaced by reading
+#  bench_fa_mixed_rvv_native.c carefully. The step 3 pv_chunk does
+#  per-lane vfmacc.vv (`O[i] += P[i] * V[i]`) — useful as a
+#  methodology demo of the dequant chain composition, but NOT the
+#  shape that real FA P·V uses.
+#
+#  Real §6 P·V (per bench_fa_mixed_rvv_native.c lines 264-279): for
+#  each key s, scalar p = e4m3_decode(P_fp8[s]); for each head_dim
+#  chunk d, O[d:d+16] += p * V_fp32_row[d:d+16]  (vfmacc.vf, broadcast
+#  scalar p across the head_dim chunk). This is the per-key
+#  scalar-broadcast accumulate that the new saturn_vfmacc_vf_f32m2
+#  @instr models.
+#
+#  pv_macc_chunk_naive captures one (key, head_dim-chunk) pair of
+#  this loop: takes scalar p_scalar (FP32, already dequant'd from
+#  FP8 by the caller), pre-dequant'd V_fp32 chunk, and the O
+#  accumulator chunk; emits one vfmacc.vf.
+#
+#  Composing this into a full FA kernel is step 4b's work. Step 4a
+#  just lands the missing primitive.
+#
+
+@proc
+def pv_macc_chunk_naive(
+    p_scalar: f32[1]  @ DRAM,
+    V_fp32:   f32[16] @ DRAM,
+    O_acc:    f32[16] @ DRAM,
+):
+    V_reg: f32[16]
+    O_reg: f32[16]
+    for i in seq(0, 16):                  # vle32_m2 (V load)
+        V_reg[i] = V_fp32[i]
+    for i in seq(0, 16):                  # vle32_m2 (O load)
+        O_reg[i] = O_acc[i]
+    for i in seq(0, 16):                  # vfmacc.vf (broadcast scalar P)
+        O_reg[i] += p_scalar[0] * V_reg[i]
+    for i in seq(0, 16):                  # vse32_m2 (O store)
+        O_acc[i] = O_reg[i]
+
+
+def schedule_pv_macc_chunk(p=pv_macc_chunk_naive, verbose=False):
+    p = set_memory(p, "V_reg", SaturnRVV_M2)
+    p = set_memory(p, "O_reg", SaturnRVV_M2)
+    p = replace(p, "for i in _: _ #0", saturn_vle32_m2)         # V load
+    p = replace(p, "for i in _: _ #0", saturn_vle32_m2)         # O load
+    p = replace(p, "for i in _: _ #0", saturn_vfmacc_vf_f32m2)  # vfmacc.vf
+    p = replace(p, "for i in _: _ #0", saturn_vse32_m2)         # O store
+    if verbose:
+        print(">>> pv_macc_chunk after replace chain:"); print(p)
+    return p
+
+
 # --- 3. Lower, emit C, verify ----------------------------------------------
 
 def _print_body_excerpt(c_data, name_prefix):
@@ -651,6 +706,7 @@ if __name__ == "__main__":
     print(online_softmax_chunk_naive)
     print(pq_chunk_naive)
     print(pv_chunk_naive)
+    print(pv_macc_chunk_naive)
 
     print("=== 2. Schedule lowering ===")
     dequant_chunk_scheduled = schedule_dequant_chunk()
@@ -677,6 +733,9 @@ if __name__ == "__main__":
     pv_chunk_scheduled = schedule_pv_chunk()
     print("--- pv_chunk after scheduling (Mo 8 step 3: P·V accumulator) ---")
     print(pv_chunk_scheduled)
+    pv_macc_chunk_scheduled = schedule_pv_macc_chunk()
+    print("--- pv_macc_chunk after scheduling (Mo 8 step 4a: proper FA shape) ---")
+    print(pv_macc_chunk_scheduled)
 
     print("=== 3. Emit C ===")
     c_data, h_data = compile_procs_to_strings(
@@ -689,6 +748,7 @@ if __name__ == "__main__":
             online_softmax_chunk_scheduled,
             pq_chunk_scheduled,
             pv_chunk_scheduled,
+            pv_macc_chunk_scheduled,
         ],
         "exo_schedule_fa.h",
     )
@@ -723,6 +783,8 @@ if __name__ == "__main__":
         # pv_chunk (Mo 8 step 3: P·V accumulator with FP8 + NVFP4 dequant)
         "SATURN_VFCONV_FP8_BF16",         # vfconv_fp8_bf16_v macro
         "__riscv_vle8_v_u8m1",            # saturn_vle8_m1 load
+        # pv_macc_chunk (Mo 8 step 4a: proper FA P·V vfmacc.vf shape)
+        "__riscv_vfmacc_vf_f32m2",        # saturn_vfmacc_vf_f32m2 intrinsic
     ]
     missing = [m for m in expected_markers if m not in c_data]
     if missing:
@@ -744,21 +806,22 @@ if __name__ == "__main__":
     _print_body_excerpt(c_data, "online_softmax_chunk")
     _print_body_excerpt(c_data, "pq_chunk")
     _print_body_excerpt(c_data, "pv_chunk")
+    _print_body_excerpt(c_data, "pv_macc_chunk")
 
     print(f"=== Summary ===")
     print(f"  C file: {len(c_data)} bytes, {c_data.count(chr(10))} lines")
     print(f"  H file: {len(h_data)} bytes, {h_data.count(chr(10))} lines")
-    print(f"  8 / 8 schedules unified; all 4 Saturn customs exercised end-to-end")
-    print(f"  (vfconv.nvfp4.bf16.v + vfconv.bf16.fp8.v + vfconv.fp8.bf16.v +")
-    print(f"   vfexp.v) plus BF16<->FP32 widen/narrow + fp32 vfmacc + reductions.")
-    print(f"  Mo 8 steps 1 + 2a + 2b + 2c + 3 done:")
+    print(f"  9 / 9 schedules unified; all 4 Saturn customs + full RVV")
+    print(f"  primitive surface exercised. Mo 8 steps 1 + 2a + 2b + 2c + 3 + 4a:")
     print(f"  - step 1:  head_dim=64 via divide_loop + per-tile stage_mem")
     print(f"  - step 2a: §6 outer-loop shape (8 heads × seq_len × head_dim tile)")
-    print(f"  - step 2b: QK^T inner-product chunk with NVFP4 dequant chain")
+    print(f"  - step 2b: QK^T per-lane vfmacc.vv accumulator chunk")
     print(f"  - step 2c: intra-tile online softmax (max+sub+narrow+exp+sum)")
-    print(f"  - step 3:  P-quant (FP32->BF16->FP8) + P·V accumulator (FP8 +")
-    print(f"             NVFP4 dequant chains feeding fp32 vfmacc into O)")
-    print(f"  Remaining: step 4 — build Exo-generated kernel on gem5 and")
-    print(f"  compare cycles to bench_fa_mixed_rvv_native. Target: within")
-    print(f"  10% of hand-coded (Mo 8 PASS).")
+    print(f"  - step 3:  P-quant + P·V (per-lane vfmacc.vv, methodology demo)")
+    print(f"  - step 4a: pv_macc_chunk with vfmacc.vf — proper FA shape, matches")
+    print(f"             bench_fa_mixed_rvv_native.c's inner P·V loop structure.")
+    print(f"  Remaining: step 4b — compose pv_macc + qkt-with-final-reduce + the")
+    print(f"  full FA loop shape into fa_kernel_naive; cross-compile.")
+    print(f"  step 4c — gem5 harness + cycle comparison vs bench_fa_mixed_rvv_native.")
+    print(f"  Target: within 10% of hand-coded (Mo 8 PASS).")
     sys.exit(0)
