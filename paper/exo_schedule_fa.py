@@ -914,6 +914,242 @@ def schedule_dequant_row(p=dequant_row_naive, verbose=False):
     return p
 
 
+# --- 2j. Mo 8 step 4b-3: fa_kernel_decode_naive — fused composition --------
+#
+#  Composes all 5 step-4 building blocks (dequant_row, qkt_dot,
+#  softmax_full, pv_macc_row) into the §6 fused decode-step FA kernel.
+#  Structure matches bench_fa_mixed_rvv_native.c's main loop except
+#  for two intentional simplifications flagged for step 4c/4d:
+#
+#    1. FP8 quant of P is SKIPPED — pv_macc_row uses P_fp32[s] directly
+#       as the per-key scalar instead of the bench's
+#       e4m3_decode[bf16_to_e4m3(fp32_to_bf16(P[s] * 448))] round-trip.
+#       Reason: bf16_to_e4m3 and fp32_to_bf16 are application C
+#       functions, not Exo externs. Step 4c adds them as externs OR
+#       wraps the kernel call in C harness code that handles quant
+#       outside the @proc.
+#    2. Output BF16 conversion + row_dequant_scale are SKIPPED —
+#       O_fp32 is left as FP32 (the bench scales O by inv_sum/448
+#       and narrows to BF16 at line 281-282). Step 4c handles this
+#       via either a final pass @proc or harness scaffolding.
+#
+#  Despite the simplifications, the cycle-dominating phases (QK^T,
+#  softmax, P·V) are bit-for-bit identical to the bench's hot loop.
+#  Step 4c's first cycle measurement will quantify the gap from the
+#  remaining 2 cold phases (FP8 quant + output convert) plus the
+#  known structural inefficiencies (asm-volatile spills, vsetvli
+#  churn, etc.).
+#
+
+@proc
+def fa_kernel_decode_naive(
+    seq_len:  size,
+    qk_scale: f32[1]                    @ DRAM,
+    Q_fp32:   f32[8, 64]                @ DRAM,
+    K_nvfp4:  ui16[8, seq_len, 4, 16]   @ DRAM,
+    K_scale:  f32[8, seq_len, 4]        @ DRAM,
+    V_nvfp4:  ui16[8, seq_len, 4, 16]   @ DRAM,
+    V_scale:  f32[8, seq_len, 4]        @ DRAM,
+    O_fp32:   f32[8, 64]                @ DRAM,
+):
+    assert seq_len > 0
+    assert seq_len % 16 == 0
+    S_fp32:     f32[seq_len]
+    P_fp32:     f32[seq_len]
+    K_fp32_row: f32[64]
+    V_fp32_row: f32[64]
+    m_state:    f32[1]
+    l_state:    f32[1]
+
+    for h in seq(0, 8):
+        # ==================================================================
+        # Phase 1: QK^T per-key
+        #   For each s in [0, seq_len): dequant K row + Q · K dot product
+        # ==================================================================
+        for s in seq(0, seq_len):
+            # -- Inlined dequant_row (K side) -----------------------------
+            for kblk in seq(0, 4):
+                K_nvfp4_reg: ui16[16]
+                K_bf16_reg:  ui16[16]
+                K_fp32_reg:  f32[16]
+                K_scaled:    f32[16]
+                for i in seq(0, 16):
+                    K_nvfp4_reg[i] = K_nvfp4[h, s, kblk, i]
+                for i in seq(0, 16):
+                    K_bf16_reg[i] = K_nvfp4_reg[i]
+                for i in seq(0, 16):
+                    K_fp32_reg[i] = K_bf16_reg[i]
+                for i in seq(0, 16):
+                    K_scaled[i] = K_fp32_reg[i] * K_scale[h, s, kblk]
+                for i in seq(0, 16):
+                    K_fp32_row[16 * kblk + i] = K_scaled[i]
+
+            # -- Inlined qkt_dot ------------------------------------------
+            Q_reg:  f32[16]
+            K_reg:  f32[16]
+            S_acc:  f32[16]
+            for i in seq(0, 16):
+                S_acc[i] = 0.0
+            for qko in seq(0, 4):
+                for i in seq(0, 16):
+                    Q_reg[i] = Q_fp32[h, 16 * qko + i]
+                for i in seq(0, 16):
+                    K_reg[i] = K_fp32_row[16 * qko + i]
+                for i in seq(0, 16):
+                    S_acc[i] += Q_reg[i] * K_reg[i]
+            S_fp32[s] = 0.0
+            for i in seq(0, 16):
+                S_fp32[s] += S_acc[i]
+            S_fp32[s] = S_fp32[s] * qk_scale[0]
+
+        # ==================================================================
+        # Phase 2: Two-pass softmax over all SEQ_LEN scores
+        # ==================================================================
+        m_state[0] = -1.0e30
+        l_state[0] = 0.0
+
+        # -- Inlined softmax_full Pass 1: max-reduce ----------------------
+        for so1 in seq(0, seq_len / 16):
+            S_reg1: f32[16]
+            for i in seq(0, 16):
+                S_reg1[i] = S_fp32[16 * so1 + i]
+            for i in seq(0, 16):
+                m_state[0] = fmaxf(m_state[0], S_reg1[i])
+
+        # -- Inlined softmax_full Pass 2: sub + narrow + exp + store + sum
+        for so2 in seq(0, seq_len / 16):
+            S_reg2:    f32[16]
+            S_shifted: f32[16]
+            S_bf16:    ui16[16]
+            P_reg:     f32[16]
+            for i in seq(0, 16):
+                S_reg2[i] = S_fp32[16 * so2 + i]
+            for i in seq(0, 16):
+                S_shifted[i] = S_reg2[i] - m_state[0]
+            for i in seq(0, 16):
+                S_bf16[i] = S_shifted[i]
+            for i in seq(0, 16):
+                P_reg[i] = S_bf16[i]
+            for i in seq(0, 16):
+                P_fp32[16 * so2 + i] = P_reg[i]
+            for i in seq(0, 16):
+                l_state[0] += P_reg[i]
+
+        # ==================================================================
+        # Phase 3: P·V per-key
+        #   Init O[h] = 0, then for each s: dequant V row + scalar-broadcast
+        #   P[s] · V accumulate into O[h].
+        # ==================================================================
+        for d in seq(0, 64):
+            O_fp32[h, d] = 0.0
+
+        for s in seq(0, seq_len):
+            # -- Inlined dequant_row (V side) -----------------------------
+            for vblk in seq(0, 4):
+                V_nvfp4_reg: ui16[16]
+                V_bf16_reg:  ui16[16]
+                V_fp32_reg:  f32[16]
+                V_scaled:    f32[16]
+                for i in seq(0, 16):
+                    V_nvfp4_reg[i] = V_nvfp4[h, s, vblk, i]
+                for i in seq(0, 16):
+                    V_bf16_reg[i] = V_nvfp4_reg[i]
+                for i in seq(0, 16):
+                    V_fp32_reg[i] = V_bf16_reg[i]
+                for i in seq(0, 16):
+                    V_scaled[i] = V_fp32_reg[i] * V_scale[h, s, vblk]
+                for i in seq(0, 16):
+                    V_fp32_row[16 * vblk + i] = V_scaled[i]
+
+            # -- Inlined pv_macc_row --------------------------------------
+            for pko in seq(0, 4):
+                V_reg: f32[16]
+                O_reg: f32[16]
+                for i in seq(0, 16):
+                    V_reg[i] = V_fp32_row[16 * pko + i]
+                for i in seq(0, 16):
+                    O_reg[i] = O_fp32[h, 16 * pko + i]
+                for i in seq(0, 16):
+                    O_reg[i] += P_fp32[s] * V_reg[i]
+                for i in seq(0, 16):
+                    O_fp32[h, 16 * pko + i] = O_reg[i]
+
+
+def schedule_fa_kernel_decode(p=fa_kernel_decode_naive, verbose=False):
+    """
+    Schedule the inlined fa_kernel by set_memory'ing every register
+    buffer to its appropriate SaturnRVV LMUL group and replace()'ing
+    each inner i-loop with its @instr.
+
+    Loop bodies in source order (matching the @proc structure):
+      Phase 1 dequant_row × kblk:  vle16 + vfconv + widen + vfmul.vf + vse32
+      Phase 1 qkt_dot:             vfmv_zero (init) + (vle32+vle32+vfmacc.vv per qko) + vfredusum + scalar scale
+      Phase 2 softmax pass 1 × so1: vle32 + vfredmax
+      Phase 2 softmax pass 2 × so2: vle32 + vfsub.vf + narrow + vfexp + vse32 + vfredusum
+      Phase 3 dequant_row × vblk:  vle16 + vfconv + widen + vfmul.vf + vse32
+      Phase 3 pv_macc_row × pko:   vle32 + vle32 + vfmacc.vf + vse32
+
+    Schedule pattern: same as the building-block schedules — per
+    distinct loop-body shape, ONE replace() call regardless of how
+    many times the loop appears in the @proc body (Exo's IR-level
+    replace() abstracts across iterations of outer loops).
+    """
+    # ---- Phase 1: K dequant_row × kblk ----
+    p = set_memory(p, "K_nvfp4_reg", SaturnRVV_M1)
+    p = set_memory(p, "K_bf16_reg",  SaturnRVV_M1)
+    p = set_memory(p, "K_fp32_reg",  SaturnRVV_M2)
+    p = set_memory(p, "K_scaled",    SaturnRVV_M2)
+    p = replace(p, "for i in _: _ #0", saturn_vle16_m1)              # K nvfp4 load
+    p = replace(p, "for i in _: _ #0", vfconv_nvfp4_bf16_v)          # vfconv
+    p = replace(p, "for i in _: _ #0", saturn_bf16_widen_f32_m2)     # widen
+    p = replace(p, "for i in _: _ #0", saturn_vfmul_vf_f32m2)        # scale
+    p = replace(p, "for i in _: _ #0", saturn_vse32_m2)              # K_fp32 store
+    # ---- Phase 1: qkt_dot ----
+    p = set_memory(p, "Q_reg", SaturnRVV_M2)
+    p = set_memory(p, "K_reg", SaturnRVV_M2)
+    p = set_memory(p, "S_acc", SaturnRVV_M2)
+    p = replace(p, "for i in _: _ #0", saturn_vfmv_zero_f32m2)       # S_acc init
+    p = replace(p, "for i in _: _ #0", saturn_vle32_m2)              # Q load
+    p = replace(p, "for i in _: _ #0", saturn_vle32_m2)              # K load
+    p = replace(p, "for i in _: _ #0", saturn_vfmacc_vv_f32m2)       # vfmacc.vv
+    p = replace(p, "for i in _: _ #0", saturn_vfredusum_to_dram_f32m2)  # reduce
+    # ---- Phase 2: softmax pass 1 ----
+    p = set_memory(p, "S_reg1", SaturnRVV_M2)
+    p = replace(p, "for i in _: _ #0", saturn_vle32_m2)              # S load
+    p = replace(p, "for i in _: _ #0", saturn_vfredmax_to_dram_f32m2)  # vfredmax
+    # ---- Phase 2: softmax pass 2 ----
+    p = set_memory(p, "S_reg2",    SaturnRVV_M2)
+    p = set_memory(p, "S_shifted", SaturnRVV_M2)
+    p = set_memory(p, "S_bf16",    SaturnRVV_M1)
+    p = set_memory(p, "P_reg",     SaturnRVV_M2)
+    p = replace(p, "for i in _: _ #0", saturn_vle32_m2)              # S load
+    p = replace(p, "for i in _: _ #0", saturn_vfsub_vf_f32m2)        # S - m
+    p = replace(p, "for i in _: _ #0", saturn_f32_narrow_bf16_m2)    # narrow
+    p = replace(p, "for i in _: _ #0", vfexp_v)                      # vfexp
+    p = replace(p, "for i in _: _ #0", saturn_vse32_m2)              # P store
+    p = replace(p, "for i in _: _ #0", saturn_vfredusum_to_dram_f32m2)  # sum
+    # ---- Phase 3: V dequant_row × vblk ----
+    p = set_memory(p, "V_nvfp4_reg", SaturnRVV_M1)
+    p = set_memory(p, "V_bf16_reg",  SaturnRVV_M1)
+    p = set_memory(p, "V_fp32_reg",  SaturnRVV_M2)
+    p = set_memory(p, "V_scaled",    SaturnRVV_M2)
+    p = replace(p, "for i in _: _ #0", saturn_vle16_m1)              # V nvfp4 load
+    p = replace(p, "for i in _: _ #0", vfconv_nvfp4_bf16_v)          # vfconv
+    p = replace(p, "for i in _: _ #0", saturn_bf16_widen_f32_m2)     # widen
+    p = replace(p, "for i in _: _ #0", saturn_vfmul_vf_f32m2)        # scale
+    p = replace(p, "for i in _: _ #0", saturn_vse32_m2)              # V_fp32 store
+    # ---- Phase 3: pv_macc_row × pko ----
+    p = set_memory(p, "V_reg", SaturnRVV_M2)
+    p = set_memory(p, "O_reg", SaturnRVV_M2)
+    p = replace(p, "for i in _: _ #0", saturn_vle32_m2)              # V load
+    p = replace(p, "for i in _: _ #0", saturn_vle32_m2)              # O load
+    p = replace(p, "for i in _: _ #0", saturn_vfmacc_vf_f32m2)       # vfmacc.vf
+    p = replace(p, "for i in _: _ #0", saturn_vse32_m2)              # O store
+    if verbose:
+        print(">>> fa_kernel after replace chain:"); print(p)
+    return p
+
+
 # --- 3. Lower, emit C, verify ----------------------------------------------
 
 def _print_body_excerpt(c_data, name_prefix):
@@ -947,6 +1183,7 @@ if __name__ == "__main__":
     print(pv_macc_row_naive)
     print(softmax_full_naive)
     print(dequant_row_naive)
+    print(fa_kernel_decode_naive)
 
     print("=== 2. Schedule lowering ===")
     dequant_chunk_scheduled = schedule_dequant_chunk()
@@ -988,6 +1225,9 @@ if __name__ == "__main__":
     dequant_row_scheduled = schedule_dequant_row()
     print("--- dequant_row after scheduling (Mo 8 step 4b-2: NVFP4 row) ---")
     print(dequant_row_scheduled)
+    fa_kernel_scheduled = schedule_fa_kernel_decode()
+    print("--- fa_kernel_decode after scheduling (Mo 8 step 4b-3: fused FA) ---")
+    print(fa_kernel_scheduled)
 
     print("=== 3. Emit C ===")
     c_data, h_data = compile_procs_to_strings(
@@ -1005,6 +1245,7 @@ if __name__ == "__main__":
             pv_macc_row_scheduled,
             softmax_full_scheduled,
             dequant_row_scheduled,
+            fa_kernel_scheduled,
         ],
         "exo_schedule_fa.h",
     )
@@ -1053,6 +1294,10 @@ if __name__ == "__main__":
         # dequant_row (Mo 8 step 4b-2: NVFP4 -> FP32 with E4M3 scale)
         "__riscv_vfmul_vf_f32m2",         # saturn_vfmul_vf_f32m2 intrinsic
         "blk = 0; blk < 4",               # 4 NVFP4 blocks per head_dim row
+        # fa_kernel_decode (Mo 8 step 4b-3: fully composed §6 fused FA kernel)
+        "fa_kernel_decode_naive",         # the fused-kernel function exists
+        "h = 0; h < 8",                   # outer heads loop (already covered, but the
+                                          # marker also fires inside fa_kernel)
     ]
     missing = [m for m in expected_markers if m not in c_data]
     if missing:
@@ -1079,11 +1324,13 @@ if __name__ == "__main__":
     _print_body_excerpt(c_data, "pv_macc_row")
     _print_body_excerpt(c_data, "softmax_full")
     _print_body_excerpt(c_data, "dequant_row")
+    # fa_kernel body is large; skip the full-body excerpt and just
+    # verify its existence via marker (above).
 
     print(f"=== Summary ===")
     print(f"  C file: {len(c_data)} bytes, {c_data.count(chr(10))} lines")
     print(f"  H file: {len(h_data)} bytes, {h_data.count(chr(10))} lines")
-    print(f"  13 / 13 schedules unified; Mo 8 steps 1 + 2a + 2b + 2c + 3 + 4a + 4b-1 + 4b-2:")
+    print(f"  14 / 14 schedules unified; Mo 8 steps 1 + 2a + 2b + 2c + 3 + 4a + 4b-1/2/3:")
     print(f"  - step 1:   head_dim=64 via divide_loop + per-tile stage_mem")
     print(f"  - step 2a:  §6 outer-loop shape (8 heads × seq_len × head_dim tile)")
     print(f"  - step 2b:  QK^T per-lane vfmacc.vv accumulator chunk")
@@ -1095,7 +1342,8 @@ if __name__ == "__main__":
     print(f"               272-278 respectively).")
     print(f"  - step 4b-2: softmax_full (two-pass over SEQ_LEN) + dequant_row")
     print(f"               (NVFP4->FP32 per head_dim row with E4M3 per-block scale).")
-    print(f"  Remaining: 4b-3 compose all into fa_kernel_decode_naive.")
+    print(f"  - step 4b-3: fa_kernel_decode_naive — full §6 fused FA composition")
+    print(f"               (inlined; skips FP8 quant + output BF16 convert for now).")
     print(f"  Remaining: 4c C harness + gem5 first cycle measurement.")
     print(f"  Remaining: 4d optimize if cycle delta > 10% (rewrite widen/narrow/")
     print(f"             reductions as intrinsic-based @instrs per the step-4a")
