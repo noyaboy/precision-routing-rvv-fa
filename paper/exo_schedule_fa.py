@@ -231,6 +231,70 @@ def schedule_dequant_64(p=dequant_64_naive, verbose=False):
     return p
 
 
+# --- 2c. §6 outer-loop shape: heads × seq_len × head_dim tile -------------
+#
+#  Mo 8 step 2a: wrap step 1's per-row tile schedule in the §6 fused-FA
+#  outer-loop structure. The §6 kernel does K-dequant inside its QK^T
+#  tile loop, but the outer-loop *shape* (heads → seq_len → head_dim tile)
+#  is the same whether the body is a plain copy (here) or the full
+#  QK^T-then-softmax compute (subsequent step-2 substeps 2b/2c). This
+#  demo shows the methodology composes to that nested-loop shape with
+#  no new @instrs.
+#
+#  Concrete dims: H = 8 heads, head_dim = 64. seq_len is a `size`
+#  parameter so the same scheduled @proc handles L2K through L16K
+#  benchmark sweeps without recompilation.
+#
+
+@proc
+def fa_dequant_per_row_naive(
+    seq_len: size,
+    K_nvfp4: ui16[8, seq_len, 64] @ DRAM,
+    K_bf16:  ui16[8, seq_len, 64] @ DRAM,
+):
+    assert seq_len > 0
+    for h in seq(0, 8):
+        for s in seq(0, seq_len):
+            for i in seq(0, 64):
+                K_bf16[h, s, i] = K_nvfp4[h, s, i]
+
+
+def schedule_fa_dequant_per_row(p=fa_dequant_per_row_naive, verbose=False):
+    # (a) Tile the innermost head_dim loop into 4 chunks of 16.
+    p = divide_loop(p, "i", 16, ["io", "ii"], perfect=True)
+    if verbose:
+        print(">>> after divide_loop:"); print(p)
+
+    # (b) Stage the windowed views of K_nvfp4 / K_bf16 into per-tile
+    #     SaturnRVV register buffers. The window expression is 3-D
+    #     because the DRAM-side buffers are [H, seq_len, head_dim]; only
+    #     the trailing dim is sliced, h and s are bound from outer loops.
+    p = stage_mem(p, "for ii in _: _",
+                  "K_nvfp4[h, s, 16*io:16*io+16]", "src_reg")
+    p = stage_mem(p, "for ii in _: _",
+                  "K_bf16[h, s, 16*io:16*io+16]",  "dst_reg")
+    if verbose:
+        print(">>> after stage_mem:"); print(p)
+
+    # (c) Collapse the same affine clutter step 1 surfaced — the
+    #     trailing-dim shapes come out as `[16*io + 16 - 16*io]`.
+    p = simplify(p)
+    if verbose:
+        print(">>> after simplify:"); print(p)
+
+    # (d) Mark the staged buffers as SaturnRVV register groups.
+    p = set_memory(p, "src_reg", SaturnRVV_M1)
+    p = set_memory(p, "dst_reg", SaturnRVV_M1)
+
+    # (e) Same replace() chain as step 1 (compute uses iter `ii`;
+    #     staged load/store loops use iter `i0` from stage_mem's
+    #     fresh-iter pool — see [[feedback-exo-scheduling-idioms]]).
+    p = replace(p, "for ii in _: _ #0", vfconv_nvfp4_bf16_v)
+    p = replace(p, "for i0 in _: _ #0", saturn_vle16_m1)
+    p = replace(p, "for i0 in _: _ #0", saturn_vse16_m1)
+    return p
+
+
 def schedule_softmax_exp_chunk(p=softmax_exp_chunk_naive, verbose=False):
     """
     Second demo: vfexp.v lane substitution. Exercises the LMUL-doubling
@@ -278,6 +342,7 @@ if __name__ == "__main__":
     print(dequant_chunk_naive)
     print(softmax_exp_chunk_naive)
     print(dequant_64_naive)
+    print(fa_dequant_per_row_naive)
 
     print("=== 2. Schedule lowering ===")
     dequant_chunk_scheduled = schedule_dequant_chunk()
@@ -289,6 +354,9 @@ if __name__ == "__main__":
     dequant_64_scheduled = schedule_dequant_64()
     print("--- dequant_64 after scheduling (divide_loop + per-tile stage) ---")
     print(dequant_64_scheduled)
+    fa_dequant_per_row_scheduled = schedule_fa_dequant_per_row()
+    print("--- fa_dequant_per_row after scheduling (§6 outer-loop shape) ---")
+    print(fa_dequant_per_row_scheduled)
 
     print("=== 3. Emit C ===")
     c_data, h_data = compile_procs_to_strings(
@@ -296,6 +364,7 @@ if __name__ == "__main__":
             dequant_chunk_scheduled,
             softmax_exp_chunk_scheduled,
             dequant_64_scheduled,
+            fa_dequant_per_row_scheduled,
         ],
         "exo_schedule_fa.h",
     )
@@ -312,6 +381,9 @@ if __name__ == "__main__":
         # dequant_64 (Mo 8 step 1: head_dim=64 scaling via divide_loop)
         "io = 0; io < 4",                 # outer-tile loop bound
         "16 * io",                        # windowed addressing
+        # fa_dequant_per_row (Mo 8 step 2a: §6 outer-loop shape)
+        "h = 0; h < 8",                   # heads outer loop
+        "s = 0; s < seq_len",             # seq_len middle loop (`size` param)
     ]
     missing = [m for m in expected_markers if m not in c_data]
     if missing:
@@ -328,13 +400,16 @@ if __name__ == "__main__":
     _print_body_excerpt(c_data, "dequant_chunk")
     _print_body_excerpt(c_data, "softmax_exp_chunk")
     _print_body_excerpt(c_data, "dequant_64")
+    _print_body_excerpt(c_data, "fa_dequant_per_row")
 
     print(f"=== Summary ===")
     print(f"  C file: {len(c_data)} bytes, {c_data.count(chr(10))} lines")
     print(f"  H file: {len(h_data)} bytes, {h_data.count(chr(10))} lines")
-    print(f"  3 / 3 schedules unified; 2 / 4 Saturn customs exercised")
-    print(f"  (vfconv.nvfp4.bf16.v + vfexp.v).  Mo 8 step 1 done: head_dim=64")
-    print(f"  scales via divide_loop(perfect=True) + per-tile stage_mem.")
-    print(f"  Follow-on steps add multi-head outer loops, softmax reductions,")
-    print(f"  P*V pass with vfconv.bf16.fp8.v + vfconv.fp8.bf16.v.")
+    print(f"  4 / 4 schedules unified; 2 / 4 Saturn customs exercised")
+    print(f"  (vfconv.nvfp4.bf16.v + vfexp.v).  Mo 8 steps 1 + 2a done:")
+    print(f"  - step 1: head_dim=64 via divide_loop + per-tile stage_mem")
+    print(f"  - step 2a: §6 outer-loop shape (8 heads × seq_len × head_dim tile)")
+    print(f"  Follow-ons: step 2b QK^T matmul kernel (needs +3 fp32 @instrs);")
+    print(f"  step 2c online softmax (needs +2 reduction @instrs); step 3")
+    print(f"  wires remaining 2 vfconv lanes (bf16.fp8.v + fp8.bf16.v).")
     sys.exit(0)
