@@ -1,0 +1,53 @@
+# FuseMax read notes (2026-05-16, for merged X+Y Y1 follow-up planning)
+
+## Papers read
+- FuseMax MICRO 2024: arXiv:2406.10491 — Nayak/Odemuyiwa/Strange/Pellauer/Emer/Kolda, "FuseMax: Leveraging Extended Einsums to Optimize Attention Accelerator Design"
+- IEEE Micro 45(4) 2025: DOI 10.1109/MM.2025.[11082638] — "From TeAAL to FuseMax: Separation of Concerns for Attention Accelerator Design", same author group. **Magazine retrospective, NOT new microarchitecture.** Same 6.7×/5.3× numbers reproduced.
+- Artifact: https://github.com/FPSG-UIUC/micro24-fusemax-artifact
+
+## What FuseMax did
+
+**Precision config**: 16-bit fixed throughout. Architecture YAML pins multiplier_width=16, adder_width=16 for every PE. FP units = 8b exp / 8b mantissa (FP16). No separate K/V-cache precision — one datatype across logits, softmax exp, accumulation, and stored K/V. **NVFP4, MXFP4, FP8, FP6 are NOT evaluated.**
+
+**Compiler/HW split**: Pure HW + dataflow design. "Cascade of Einsums" is a mathematical abstraction (TeAAL-based), NOT a programmable compiler or codegen. Designs are described as Einsum specs, mapped/bound by HAND to a fixed spatial array. Modeled with Timeloop + Accelergy. **No DSL emits RTL or vector ISA code.**
+
+**Target HW**: 2D 256×256 + 1D 256 spatial PE mesh. One fpmac + one max-compare + sequential mac_exponential per PE. 940 MHz, 16nm (TPUv3-like timing); 45nm Accelergy/Aladdin for area/energy. HBM2 DRAM, 32-bank SRAM global buffer. No mm² or W reported, only relative ratios.
+
+**Comparisons**: FLAT (primary, iso-area), FlashAttention-2, TileFlow, E.T., PyTorch/TF, Rabe&Staats, Choi et al. Result: **6.7× speedup vs FLAT at 79% energy** (attention), **5.3× end-to-end at 83% energy**.
+
+**Workloads**: BERT, TrXL, T5, XLM (encoder/decoder-encoder transformers). Target "1M tokens and beyond". **No Llama, no llama.cpp, no autoregressive decoder LLM, no KV-cache growth evaluation.**
+
+## Novelty surface for our merged X+Y follow-up (all six axes OPEN)
+
+| Axis | Open? | Why |
+|---|---|---|
+| RVV ISA | OPEN | FuseMax = fixed spatial array, no vector ISA |
+| NVFP4 (block 16, E4M3 scale) | OPEN | All eval is FP16; sub-FP8 absent |
+| Exo @instr compiler | OPEN | TeAAL is descriptive; no scheduling DSL bound to ISA |
+| Saturn microarch | OPEN | 256×256 mesh ≠ long-vector OoO unit; Saturn unmentioned |
+| VLEN-agnostic codegen | OPEN | meshX/meshY hard-pinned 256, no parametric sweep |
+| Decoder LLM E2E + llama.cpp | OPEN | Encoder/seq2seq only (BERT/T5/XLM/TrXL) |
+
+## Differentiation lines for our paper
+
+The Y1 paper write-up can lead with:
+1. "FuseMax shows attention fusion matters; we extend to **mixed precision** routing per stage."
+2. "FuseMax uses fixed Einsum dataflow descriptions; we add **compiler co-design via Exo @instr** binding to real RVV custom instructions."
+3. "FuseMax targets a 256×256 systolic mesh; we target **RVV vector + Saturn** with VLEN-parameterized scheduling."
+4. "FuseMax evaluates on encoder transformers (BERT/T5); we evaluate **autoregressive decoder LLMs** (Llama-3.2-1B) where KV-cache memory bandwidth is the bottleneck."
+5. "FuseMax pins all stages to FP16; we route **BF16 logits / NVFP4 K/V cache / FP8 softmax / BF16 output**."
+
+## Citations to add to /home/noah/project/riscv/paper/related_work.md
+
+- **Nayak et al., TeAAL ASPLOS 2024** — declarative sparse-tensor framework, parent of FuseMax's Einsum methodology. Needed for contrasting Exo @instr (we use) vs TeAAL spec-only (they use).
+- **Odemuyiwa et al., LoopTree TACO/PACT 2024** — fused-layer dataflow design space; cited by FuseMax for fusion analysis. Relevant to our fused-FA scheduling work.
+- **Wu et al., TileFlow MICRO 2023** — fusion-dataflow modeling tool; FuseMax's main fusion-tooling comparator.
+- **Choi et al., HPCA/MICRO 2022-2023 attention accelerator** — alternate softmax-dataflow baseline FuseMax compares against; cites differing exp/normalize fusion choices.
+- **Rabe & Staats 2022, "Self-attention does not need O(n²) memory"** — the online-softmax precursor that both FuseMax papers ground their formulation in. Already a precursor for FlashAttention; should be in our bibliography for the same reason.
+
+## Strategic notes for Task 9 (precision config pin)
+
+- FuseMax's all-FP16 result gives us a clear baseline to beat on memory bandwidth (4× via NVFP4 K/V) while staying accurate.
+- IEEE Micro 2025 retrospective adds **zero** new precision evaluation — we are not late to a mixed-precision FuseMax extension.
+- The "extended Einsums" framework is descriptive — meaning precision is a "free variable" they didn't sweep. Our paper can frame: "FuseMax left the precision dimension unexplored; we route precisions per Einsum-stage via Exo @instr."
+- ARCQuant (arXiv:2601.07475) is the recent NVFP4-for-LLM algorithm paper — cite as the "algorithm baseline that motivates HW support."

@@ -1,0 +1,153 @@
+# Paper intro draft v2 — MLArchSys 2027 (rewritten 2026-05-16 PM for merged X+Y)
+
+Target: MLArchSys 2027 workshop submission. **Merged X+Y direction** (mixed-precision fused FA on Saturn + NVFP4 K/V cache + Exo compiler precision-routing + llama.cpp E2E).
+Constraint: compiler co-design leads, FU follows. Precision-routing is the headline (not vfexp).
+Replaces draft v1 (Proposal X / vfexp-headline). v1 is obsolete — based on closed gap (upstream ggml_v_expf_m2 already vectorized softmax in RVV).
+
+## Title (candidates, pick one before submission)
+
+1. **Precision-Routing RVV Flash Attention: Compiler-Scheduled Custom Conversion Lanes for Edge LLM Inference**  (recommended — descriptive, names the technique)
+2. Compiler-Scheduled Mixed-Precision Flash Attention on Saturn RVV  (shorter, leads with co-design)
+3. NVFP4 KV-Cache Flash Attention on Open RISC-V Vector Hardware: An Exo + Saturn Co-Design  (NVFP4-first, vendor-name-heavy)
+
+## Abstract (draft 1, ~225 words)
+
+Edge LLM inference is shifting to RISC-V silicon — SiFive Intelligence, SpacemiT K1, Tenstorrent Ascalon, and Andes AX65 ship RVV 1.0 cores today — and the open RVV software stack has caught up: upstream llama.cpp now provides a polynomial RVV softmax kernel and a K1-tuned fused flash-attention path. The gap that remains is *precision routing*. Edge-LLM decode is memory-bandwidth-bound — every generated token reads the entire KV cache — and the open RVV stack pins all attention stages to one precision, leaving the headline KV-cache bandwidth savings (3.2× from 4-bit microscale formats like NVFP4) unrealized. Existing fused-attention hardware (FuseMax, MICRO 2024) likewise pins one precision; concurrent RVV custom-instruction work (VEXP ARITH 2025, VMXDOTP DATE 2026) accelerates individual ops but not the full attention pipeline with mixed precision. We present a co-designed mixed-precision fused flash-attention stack: (i) four new RVV custom instructions on the Berkeley Saturn vector unit — `vfconv.nvfp4.bf16.v`, `vfconv.bf16.fp8.v`, `vfconv.fp8.bf16.v`, and a pipelined `vfexp.v` — implementing the precision-conversion lanes attention needs (~0.14 mm² @ 16nm, ~3% of Saturn); (ii) an Exo 2 precision-routing scheduling pass that emits VLEN-parameterized fused flash-attention kernels routing per stage (BF16 logits / NVFP4 K-V cache / FP32 softmax accumulator / FP8-E4M3 attention weights); (iii) end-to-end integration in llama.cpp. On Chipyard FireSim and against SpacemiT K1's hand-tuned VLEN=1024 fused FA, we achieve [N]× Llama-3.2-1B decode speedup at <1.0 perplexity degradation. All RTL, compiler passes, and kernels open-source.
+
+Keywords: RISC-V, RVV, large language models, flash attention, mixed precision, NVFP4, compiler co-design, scheduling DSL, open hardware.
+
+## Abstract risk flags
+
+- "Caught up" — verify llama.cpp current state at submission time. `ggml_v_expf_m2` was added by N upstream commits before 2026-05-16; SpacemiT FA `forward_flash_attn_ext_f16_*_vlen1024_vf16` ditto. If upstream further closes the precision-routing gap before submission, abstract needs adjustment.
+- "First" implicit in stack composition — set up arXiv keyword alerts (RISC-V, RVV, vector, attention, NVFP4, MXFP4, mixed precision, flash attention) so concurrent work surfaces. Benini group (VEXP, VMXDOTP) is the highest-risk concurrent author.
+- "3.2× KV-cache memory bandwidth saving" — analytical (block 16 + scale overhead). Confirm with gem5 microbench (Mo 2 checkpoint) before submission.
+- "<1.0 perplexity degradation" — depends on calibration; need to actually run NVFP4 quant on Llama-3.2-1B (ARCQuant tooling available). Hold the specific number until measured.
+- SiFive Intelligence / SpacemiT K1 / Tenstorrent Ascalon / Andes AX65 — verify each is RVA23 / RVV 1.0 (XuanTie C906 is RVV 0.7, do not list; Tenstorrent uses Ascalon for RVV but earlier products were not RVV at all).
+- "0.14 mm² @ 16nm" — currently from rough NAND2-equiv estimate. Tighten via Yosys synthesis before submission.
+
+## Hook paragraph (draft 1, ~210 words)
+
+Edge LLM inference has shifted from research to production: Apple Intelligence, Llama-3.2-1B/3B, Phi-3.5 mini, and Gemini Nano run on consumer devices, and on-device serving is increasingly the default. RISC-V is the emerging open-hardware substrate — SiFive Intelligence X-series, SpacemiT K1, Tenstorrent Ascalon, and Andes AX65 ship RVV 1.0 cores today. The open software stack has matured along with the silicon: upstream llama.cpp now ships a polynomial RVV softmax kernel (`ggml_v_expf_m2`) and a SpacemiT-tuned VLEN=1024 fused flash-attention path. But edge-LLM decode is *memory-bandwidth-bound* — each generated token reads the entire KV cache — and the open RVV stack pins all attention stages to one precision, leaving the headline KV-cache bandwidth savings (3.2× from 4-bit microscale formats like NVFP4 [ARCQuant 2026]) unrealized. The fundamental gap is not a missing op (softmax is vectorized) or a missing fused kernel (SpacemiT shipped one for K1) — it is the *co-design loop* between custom precision-conversion hardware and a compiler that decides safely which precision per attention stage. Existing fused-attention HW (FuseMax, MICRO 2024) pins FP16 throughout; concurrent custom-instruction work targets individual ops (VEXP scalar softmax-exp; VMXDOTP unfused GEMM). **We close this loop with four new RVV instructions on the Berkeley Saturn vector unit, an Exo 2 precision-routing scheduling pass, and an end-to-end llama.cpp integration on Llama-3.2-1B. All RTL, compiler passes, and kernels are open-source.**
+
+## Citation needs
+
+- [Titopoulos 2025] = arXiv:2510.06834, also J. Supercomp 2026 doi:10.1007/s11227-026-08322-x
+- [VEXP 2025] = arXiv:2504.11227, ARITH 2025
+- [VMXDOTP 2026] = arXiv:2603.04979, DATE 2026 (Wipfli/Islamoglu/Benini)
+- [ARCQuant 2026] = arXiv:2601.07475
+- [FuseMax 2024] = arXiv:2406.10491, MICRO 2024; follow-up IEEE Micro 45(4) 2025 doi:10.1109/MM.2025.[11082638]
+- [TeAAL 2024] = Nayak et al., ASPLOS 2024 (Einsum framework parent of FuseMax)
+- [Exo 2 2025] = arXiv:2411.07211, ASPLOS 2025
+- [IREE-RVV 2025] = arXiv:2508.14899
+- [SpacemiT K1 FA upstream] = llama.cpp ggml/src/ggml-cpu/spacemit/rvv_kernels.cpp (cite commit hash + PR number)
+- [llama.cpp ggml_v_expf_m2 upstream] = ggml/src/ggml-cpu/vec.h (cite commit + PR)
+- Apple Intelligence: Apple WWDC 2024 announcement
+- Llama-3.2: Meta blog Sep 2024
+- Phi-3.5 mini: Microsoft technical report
+- Gemini Nano: Google AI blog
+- SiFive Intelligence X-series: SiFive product brief
+- SpacemiT K1: BPI-F3 / LicheePi 4A spec
+- Tenstorrent Ascalon: Tenstorrent technical brief (verify RVA23)
+- Andes AX65: Andes product brief
+
+## Open issues to resolve
+
+1. **Quantitative claims unfilled.** [N]× speedup, perplexity number, energy per token — fill from Mo 2 (NVFP4 BW microbench) and Mo 10 (E2E llama.cpp) measurements.
+2. **NVFP4 calibration TBD.** ARCQuant tooling needs running on Llama-3.2-1B. Decide before Mo 4: round-to-nearest vs GPTQ-style calibration?
+3. **"Co-design loop" framing.** Workshop reviewers may prefer concrete framing — see alt sentence 4 below.
+4. **Vendor list verification.** Confirm each listed RISC-V vendor ships RVA23 = RVV 1.0 at submission time. Add/remove vendors as needed.
+5. **VLEN target.** Body should declare VLEN=256 as Saturn default but demonstrate VLEN-parameterized correctness via 128/256/512 sweeps.
+
+## Alternative phrasings
+
+Sentence 4 of hook (more concrete, less abstract):
+> What's missing is a compiler that knows which precision is safe at which point in attention. A kernel author today must choose between hand-writing RVV intrinsics at fixed precision (which SpacemiT did for K1 at FP16, but only at VLEN=1024) or using a vendor compiler (IREE-RVV) that lacks custom-instruction awareness for NVFP4 dequant lanes.
+
+Sentence 5 of hook (microarchitecture-leaning if advisor pulls toward HW):
+> We propose four custom RVV precision-conversion instructions on Saturn — `vfconv.nvfp4.bf16.v`, `vfconv.bf16.fp8.v`, `vfconv.fp8.bf16.v`, `vfexp.v` — and extend Exo 2 with a precision-routing scheduling pass that emits a fused flash-attention kernel using them.
+
+Sentence 5 of hook (compiler-leaning if advisor pulls toward DSL):
+> We extend Exo 2 with a precision-routing scheduling pass that emits a fused flash-attention kernel driven by four new custom RVV instructions on the Berkeley Saturn vector unit, replacing per-stage hand-coded intrinsic kernels with a single compiler-generated specification.
+
+## Contributions (draft 1)
+
+1. **Per-stage precision-routing analysis for fused attention.** We identify KV-cache memory bandwidth as the edge-LLM decode bottleneck and decompose attention into stages with different precision tolerance: logits (BF16), softmax sum-accumulator (FP32), KV cache (NVFP4 block 16 with E4M3 scale), attention weights (FP8-E4M3), output (BF16). We characterize the perplexity / area / bandwidth trade-off of each stage independently on Llama-3.2-1B. To our knowledge, this is the first per-stage precision-routing analysis for fused-attention on an open vector ISA; FuseMax pins one precision throughout and ARCQuant's NVFP4 work is algorithm-only.
+
+2. **Four RVV custom instructions on Saturn.** We design and implement `vfconv.nvfp4.bf16.v` (3-cycle pipelined NVFP4 dequant with block-16 E4M3 scale broadcast), `vfconv.bf16.fp8.v` (2-cycle BF16→E4M3 quant with saturation), `vfconv.fp8.bf16.v` (1-cycle E4M3→BF16 dequant), and `vfexp.v` (8-cycle pipelined exp via range-reduce + degree-5 minimax + reconstruct). Implemented as new functional units via Saturn's `FunctionalUnitFactory`. Total area: ~0.14 mm² @ 16nm, ~3% of Saturn baseline. RTL open-source; reusable on Ara and T1 with mechanical port changes.
+
+3. **Exo 2 precision-routing pass.** We extend the Exo 2 scheduling DSL [Exo 2025] with `@instr` declarations for the four custom instructions and a precision-routing pass that maps each attention stage to its assigned dtype, emitting a single fused flash-attention kernel covering QK^T → softmax → ·V. The pass is VLEN-parameterized: the same Exo specification generates correct kernels for VLEN=128/256/512. Prior Exo backends target AVX-512, NEON, Gemmini, and RVM; ours is the first RVV 1.0 backend with custom-instruction awareness. (Verify before submission: Ragan-Kelley group has not published Exo-RVV as of 2026-05-16 recheck; Exo trunk added ARM SVE May 2025, nothing RVV.)
+
+4. **Fused flash-attention kernel on Saturn.** Our Exo-generated kernel uses the four custom instructions in a single pass: NVFP4 K/V dequant streamed into BF16 matmul, vfexp inside softmax with FP32 accumulator, FP8-E4M3 attention weights re-quantized for the second matmul. We demonstrate correctness against the FP16 reference on Llama-3.2-1B and bit-equivalence with a hand-coded RVV reference at fixed VLEN. Throughput targets: ≥0.9× hand-coded at VLEN=256 (Mo 8 checkpoint).
+
+5. **End-to-end Llama-3.2-1B inference in llama.cpp.** We integrate the Exo-generated kernel into llama.cpp's RVV path via a new `GGML_RVV_NVFP4` backend variant and report Llama-3.2-1B decode throughput, energy per token, and prefill latency on Chipyard FireSim (Saturn + Rocket SoC) vs (a) upstream generic RVV FA, (b) SpacemiT K1 hand-tuned VLEN=1024 FA, (c) ARM Cortex-X4 commodity reference. Quantitative claim: ≥1.5× decode speedup at iso-perplexity (≤1.0 perplexity points degradation on WikiText-2 + C4) vs K1 (Mo 10 checkpoint).
+
+6. **Open-source artifact.** All Saturn RTL fork, Chisel testbenches, Exo `@instr` library, scheduled kernels, llama.cpp patch series, benchmark scripts, and NVFP4 calibration data open-source under permissive license. Upstream PRs filed against Saturn (RTL), Exo (instruction library), and llama.cpp (NVFP4 backend variant). PR strategy: small upstream patches early (e.g., VLEN-parameterized generic fused FA generalizing SpacemiT's path, before NVFP4 lands).
+
+## Risk flags on contribution claims
+
+- "First per-stage precision-routing analysis for fused attention on open vector ISA": verify FuseMax/TeAAL papers don't have a precision-sweep we missed. ARCQuant is algorithm-only (no fused kernel). Re-search before submission.
+- "First Exo backend with RVV custom-instruction awareness": same Ragan-Kelley group watch-list applies. Email Exo authors before submission; offer co-authorship if they're working on this.
+- "≥1.5× decode speedup vs K1": K1 baseline must be measured (Path A advisor-borrow OR run llama.cpp Q8_0 on a real K1 board via advisor). Don't submit without a real silicon number.
+- "≥0.9× hand-coded": Mo 8 gate. If Exo can't match hand-coded within 10%, paper drops the compiler-co-design lead and rewrites around hand-coded kernels — major framing shift.
+- "<1.0 perplexity degradation": needs measured number on the actual quantized model, not analytical estimate.
+- "Open-source at submission time": verify the public repo ships before the camera-ready deadline; don't submit on private code.
+
+## Table 1: Comparison snapshot (draft v2)
+
+Caption: Related work on key positioning axes. "Open RTL" = RTL artifacts publicly available; "Custom FU" = new functional unit beyond standard ISA; "Mixed prec" = per-stage precision routing within one kernel; "Compiler" = how kernels are produced; "E2E LLM" = demonstrates a real LLM (not microbenchmark); "OSS stack" = full stack (RTL + compiler + kernels) is open-source.
+
+| Work | ISA / Platform | Open RTL | Custom FU | Mixed prec | Compiler | E2E LLM | OSS stack |
+|---|---|---|---|---|---|---|---|
+| FuseMax [MICRO'24] | Custom spatial | partial (model) | full-attention FU | no (FP16) | Einsum spec only | no | no |
+| VEXP [ARITH'25] | Snitch (packed-SIMD) | yes | softmax-exp | no (BF16) | hand intrinsics | no (FA-2 microbench) | partial |
+| VMXDOTP [DATE'26] | Spatz (RVV) | yes | MX dot product | partial (MX, no FA) | hand intrinsics | no (DeiT image) | partial |
+| Titopoulos [J.Supercomp'26] | RVV 1.0 (gem5) | no | no | no | hand intrinsics | no (FA microbench) | code only |
+| SystolicAttention [arXiv:2507.11331] | Custom systolic | no (closed) | full-attention FU | no | no | no | no |
+| SpacemiT FA [llama.cpp upstream] | K1 (VLEN=1024 only) | no (vendor) | no | no | hand-tuned C++ | yes (Llama-3.2) | partial (kernel) |
+| IREE-RVV [arXiv:2508.14899] | SiFive Intelligence | no (vendor) | no | partial (INT8) | MLIR closed | yes (Llama-3.2) | no (SKL closed) |
+| **Ours** | **RVV 1.0 (Saturn)** | **yes** | **4 (NVFP4↔BF16↔FP8 + vfexp)** | **yes (per-stage)** | **Exo 2 @instr DSL** | **yes (Llama-3.2-1B via llama.cpp)** | **yes** |
+
+Headline sentence: "We are the only entry combining open RTL, custom precision-conversion functional units, per-stage mixed-precision routing within the fused-attention kernel, scheduling-DSL compiler co-design, end-to-end LLM, and a fully open stack."
+
+## Table 1 risk flags
+
+- FuseMax "partial (model)": confirm whether the MICRO'24 artifact ships RTL or only the performance model. FPSG-UIUC artifact repo (https://github.com/FPSG-UIUC/micro24-fusemax-artifact) appears YAML+Timeloop, not Verilog. If model-only, change to "no."
+- VMXDOTP "partial (MX, no FA)": confirm MX in their work includes E2M1 or only MXFP8.
+- SpacemiT FA "partial (kernel)": kernel C++ is in upstream llama.cpp; SoC RTL is vendor-closed. Hence "partial."
+- IREE-RVV "yes E2E": confirm SiFive's published Llama-3.2-1B numbers are reproducible from public artifacts (likely they're not — SKL kernels are closed).
+- Ours "yes" everywhere: column status holds only once the public repo ships. Don't submit before the artifact is genuinely public and reproducible.
+- VMXDOTP "yes Open RTL": their public artifact — verify if their Spatz fork is on GitHub at submission time (DATE 2026 paper from March; likely yes, but check).
+
+## Quantitative target table (TBD — fills with measurements)
+
+| Metric | Our target | SpacemiT K1 baseline (measured) | Upstream generic RVV FA (gem5) | ARM Cortex-X4 reference |
+|---|---|---|---|---|
+| Decode throughput (Llama-3.2-1B, tok/s) | ≥ 1.5× K1 | TBD | TBD | TBD |
+| KV-cache memory bandwidth (GB/s, decode) | ≤ 0.31× K1 | TBD | TBD | TBD |
+| Energy per token (mJ) | TBD | TBD | TBD | TBD |
+| Perplexity (Llama-3.2-1B, WikiText-2) | ≤ baseline + 1.0 | n/a (FP16 reference) | n/a | n/a |
+| Prefill latency (1k tokens, ms) | TBD | TBD | TBD | TBD |
+| FU area (mm² @ 16nm) | ~0.14 | n/a (commodity) | n/a | n/a |
+| FU area as % of Saturn baseline | ~3% | n/a | n/a | n/a |
+
+## Section outline (workshop, ~6 pages)
+
+1. Introduction (hook + abstract above)
+2. Background: edge-LLM bottlenecks, RVV 1.0, Saturn, Exo 2, NVFP4 spec
+3. Per-stage precision-routing analysis (Contribution 1)
+4. Hardware: four custom instructions on Saturn (Contribution 2)
+5. Compiler: Exo precision-routing pass (Contribution 3)
+6. Fused FA kernel + llama.cpp integration (Contributions 4-5)
+7. Evaluation: area, bandwidth, throughput, perplexity, energy
+8. Related work
+9. Conclusion
+
+## Changes from draft v1 (vfexp-headline obsolete)
+
+- Headline shifted from "fill the missing scalar softmax gap with vfexp" to "route precisions per attention stage with compiler-driven HW."
+- vfexp now one of four new instructions, not the headline novelty.
+- Comparison table adds: VMXDOTP (DATE'26), SpacemiT FA (upstream), "Mixed prec" column.
+- Contribution 1 reframed: was "compiler-aware RVV ISA extension methodology"; now "per-stage precision-routing analysis."
+- Contribution 2 expanded: was vfexp only; now 4 custom instructions.
+- Mo 2 threshold reframed: was "softmax/exp ≥10% of decode"; now "NVFP4 K/V reduces decode BW ≥30% vs FP16."
+- All references to "first open RVV-1.0 attention stack" softened: SpacemiT's path is an open kernel; we're "first open per-stage mixed-precision RVV fused FA" — more specific.

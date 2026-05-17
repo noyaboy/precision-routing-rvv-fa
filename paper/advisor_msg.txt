@@ -1,0 +1,63 @@
+# Advisor message — RVV 1.0 hardware borrow (rewritten 2026-05-16 PM for merged X+Y direction)
+
+Light ask, no project pitch. Pitch is deferred to a later message after Mo 4 RTL milestone.
+
+The light-touch framing still holds despite the Y1 direction change — the advisor doesn't need to know the proposal details yet, only that we want silicon for baselining. What's changed since the prior draft is the *workload description* (now KV-cache bandwidth + decode tok/s, not generic per-op profile), and the deferred-pitch notes (now mixed-precision + NVFP4 + Exo, not vfexp).
+
+---
+
+## English version (Slack/email)
+
+Hi [Advisor],
+
+Quick ask for a side project I'm scoping — does the lab have an RVV 1.0 board (SiFive Premier P550, SpacemiT K1 / BPI-F3, or anything similar) I could borrow for ~6 months of baseline measurements? FireSim / AWS-F1 access for Chipyard runs would also work if that's easier.
+
+I'm running Llama-3.2-1B decode baselines on `llama.cpp`'s RVV path — KV-cache bandwidth, decode tok/s, and energy per token — to anchor a fused-attention design study against real silicon. Happy to share more once it's more concrete; for now I'd just like to nail down the commodity baseline.
+
+Thanks!
+[Your name]
+
+---
+
+## Even-shorter Slack version
+
+Hey — quick one. Side project I'm scoping needs RVV 1.0 silicon for Llama-3.2-1B `llama.cpp` decode baselines (KV-cache bandwidth + tok/s, ~6 months). Anything in the lab I could borrow — SiFive P550, BPI-F3, FireSim/F1, etc.? Happy to share details once it's a bit more concrete.
+
+---
+
+## Why this framing
+
+- "Side project I'm scoping" — honest, doesn't overcommit, signals you'll share more later.
+- Specifies the workload (Llama-3.2-1B decode + KV-cache bandwidth) so they know it's not exotic and matches the LLM-arch + compiler-co-design space the advisor already works in. Hints at the real research direction without pitching.
+- Lists multiple acceptable answers (SiFive / SpacemiT / FireSim) so they don't get stuck looking for the exact item.
+- Time-bounded ask (~6 months) — not indefinite borrow.
+- "Happy to share once concrete" — softly opens the door to the eventual project pitch without forcing it.
+
+## What NOT to include (yet)
+
+- The MLArchSys 2027 submission target.
+- The mixed-precision NVFP4 K/V cache + Exo precision-routing pass + four custom RVV instructions plan. Defer to the full pitch after Mo 4 RTL milestone, when you can show a working `vfexp` Chisel module + area numbers + a precision-routing demo.
+- Any mention of PhD applications.
+- Budget/cost framing — borrowing hardware is normal lab practice, not a financial ask.
+- The Saturn microarch advantage angle (chaining, scoreboard, OoO) — this is a positioning hook for the full pitch, premature here.
+
+## What WOULD be honest to share if asked follow-up questions
+
+If the advisor asks "what's the side project?", a 30-second answer that doesn't pre-commit:
+> "Mixed-precision fused attention on Saturn for edge LLM decode — NVFP4 K/V cache with compiler-scheduled precision routing. Workshop target at MLArchSys 2027. Still scoping the FU design; I'll send a real pitch after I have the basic Chisel module."
+
+This is honest, leads with the compiler co-design (advisor's wheelhouse), and signals you have a 12-month plan but want to validate the RTL before formally pitching.
+
+## After sending
+
+- If yes (lab has board): drop hardware purchase entirely; SpacemiT K1 baseline anchors Mo 6/10 quant claims. Focus on Chipyard + Saturn + gem5 simulation as parallel path.
+- If "we don't have RVV silicon but we have FireSim/F1": even better — full Chipyard FireSim flow for Saturn + Rocket SoC. Schedule a 15-min sync to get AWS credentials.
+- If no / no response in 1 week: gem5 simulation carries the workshop submission (Path B alone is workshop-OK per MLArchSys norms; Titopoulos precedent). Revisit silicon ask for the Y2 conference paper.
+
+## Pitching strategy after this initial ask (preserved from memory for reference)
+
+When ready to pitch the full project after Mo 4 milestone:
+1. Lead with verified gap: upstream RVV stack has poly-expf + K1-tuned FA but NO per-stage mixed-precision routing.
+2. Emphasize compiler co-design (Exo precision-routing pass) — direct alignment with advisor's research wheelhouse.
+3. Offer co-authorship if paper lands.
+4. Leave integration level (loose side vs tight group thread) to the advisor.

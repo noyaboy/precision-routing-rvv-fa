@@ -1,0 +1,94 @@
+# RISC-V side-project — measurement plan (rewritten 2026-05-16 PM for merged X+Y)
+
+Target: MLArchSys 2027 submission (~Apr 2027). 11 months from now.
+Fills every TBD in `intro_draft.txt` v2 and validates the Mo-checkpoint thresholds locked in `handoff.txt`.
+
+## What needs measuring (replaces vfexp-centric old plan)
+
+1. **Llama-3.2-1B decode tok/s** — ours (Saturn + 4 custom FUs + mixed-prec) vs upstream generic RVV FA vs SpacemiT K1 VLEN=1024 FA (FP16) vs ARM Cortex-X4 commodity reference.
+2. **KV-cache memory bandwidth (GB/s, decode)** — ours (NVFP4 K/V) vs FP16 K/V baseline. **Mo 2 headline number.**
+3. **Energy per token (mJ)** at iso-throughput — ours vs SpacemiT K1.
+4. **Prefill latency (1k tokens)** — same four platforms.
+5. **Precision-routing FU primitives** — cycle latency + area for each of `vfconv.nvfp4.bf16.v`, `vfconv.bf16.fp8.v`, `vfconv.fp8.bf16.v`, `vfexp.v` (4 numbers each: cycle, area mm², area % Saturn, max error vs scalar reference).
+6. **PPA delta**: Saturn + precision-routing FU vs unmodified Saturn @ 16 nm est. via Yosys/OpenROAD.
+7. **Exo-generated kernel vs hand-coded** RVV intrinsics — parity check on cycle count, correctness vs FP16 reference.
+8. **Llama-3.2-1B perplexity** (WikiText-2 + C4) — mixed-precision (BF16 logits / NVFP4 K-V / FP32 softmax / FP8 attn weights / BF16 output) vs FP16 baseline. **Target: <1.0 perplexity points degradation.**
+
+## Phase plan (rewritten for merged X+Y)
+
+| Phase | Window | Deliverable | Validates |
+|---|---|---|---|
+| 0. Tooling | DONE 2026-05-16 evening | Bootlin GCC 13.2 + gem5 SE + patched llama.cpp rv64gcv binary + Q4_K_M/Q8_0 models | infra reusable |
+| 1. Mo 2 NVFP4-BW microbench | wk 2-3 | gem5 SE microbench: NVFP4 K-cache dequant + GEMV vs FP16 K-cache GEMV; per-byte BW counters | **Mo 2 (≥30% BW reduction)** |
+| 2. `vfexp.v` Chisel prototype | mo 1-2 | VFExpLane.scala (~300 LOC) + ChiselTest against scalar expf (10⁶ random inputs, max rel err <2⁻¹⁶) | early HW signal |
+| 3. Full precision-routing FU | mo 2-4 | All 4 instructions in `PrecisionRoutingFU.scala`; Saturn `FunctionalUnitFactory` integration; Yosys synth → area | **Mo 4 (FU area ≤10% Saturn)** |
+| 4. Hand-coded fused FA on Saturn | mo 4-6 | RVV intrinsics fused FA using all 4 FUs; cycle count vs SpacemiT K1 VLEN=1024 FA at iso-VLEN | **Mo 6 (≥1.5× K1 iso-VLEN)** |
+| 5. Exo precision-routing pass | mo 6-8 | `@instr` declarations + precision-routing pass; emit VLEN-parametric fused FA; bit-equivalent with hand-coded | **Mo 8 (parity ≥0.9× hand-coded)** |
+| 6. llama.cpp `GGML_RVV_NVFP4` backend | mo 8-9 | New backend variant calling Exo-generated kernel; perplexity sweep | E2E correctness + accuracy |
+| 7. ASIC synth + power model | mo 9-10 | Yosys + OpenROAD @ 16nm est.; power model for energy-per-token claim | energy/area claims |
+| 8. FireSim E2E | mo 10-11 | FPGA-accelerated Saturn + Rocket SoC; full Llama-3.2-1B decode with real energy | **Mo 10 (≥1.5× K1 iso-power E2E)** |
+
+## Mo 2 measurement detail (highest immediate priority)
+
+**Question**: Does NVFP4 K/V cache reduce decode memory bandwidth by ≥30% vs FP16 K/V on the Saturn-targeted RVV path?
+
+**Approach** (zero-cost, gem5 SE-based, no silicon needed):
+1. Write a small NVFP4 dequant + matmul microbench in C with RVV intrinsics targeting Saturn-like dimensions:
+   - KV-cache representative shape: GQA n_kv_heads=8, head_dim=64, seq_len=2048
+   - One iteration: dequant K (NVFP4 → BF16) + GEMV (Q × K^T)
+2. Compare against the FP16-K-cache GEMV (using existing `__riscv_vle16` + `__riscv_vfmul`)
+3. Run both under gem5 SE with `--cpu-type=TimingSimpleCPU` + simple cache hierarchy (32 KB L1D, 512 KB L2)
+4. Capture from gem5 stats:
+   - `system.cpu.dcache.overallAccesses::total` (cache accesses)
+   - `system.cpu.dcache.overallMisses::total` (misses → DRAM bytes)
+   - `system.mem_ctrls.bytesRead::total` (DRAM bytes read)
+   - cycle count
+5. Compute bandwidth ratio: `(FP16 bytes / FP16 cycles) / (NVFP4 bytes / NVFP4 cycles)`
+
+**Analytical anchor**: NVFP4 K/V with block-16 scale = 4.5 bits/element vs FP16 = 16 bits/element → 3.56× compression. Saturn-bound decode at seq_len=2048 should see ~3× actual BW reduction (some overhead from dequant lane). Mo 2 threshold (≥30%) comfortably exceeded analytically; gem5 confirms.
+
+**Reusable infrastructure for Mo 2**:
+- Cross-compile: `riscv64-linux-gcc -march=rv64gcv -mabi=lp64d -static -O2 microbench.c -o microbench`
+- gem5: `gem5.opt configs/deprecated/example/se.py --cpu-type=TimingSimpleCPU --num-cpus=4 -c microbench`
+- All paths already verified on this host (see `handoff.txt`)
+
+**If Mo 2 fails (<30% BW reduction)**:
+- First diagnose: is it the dequant lane overhead? Run NVFP4 K-cache GEMV WITHOUT dequant cost (pre-dequanted in memory) → upper bound on possible win.
+- If upper bound is <30%, NVFP4 K/V isn't the right pitch — pivot back to options B/C/D from the widening menu.
+- If upper bound is ≥50% but our actual is <30%, the dequant FU is the bottleneck → optimize the `vfconv.nvfp4.bf16.v` cycle latency before paper submission.
+
+## Paths to commodity baselines (parallel)
+
+**Path A (open, light ask sent? — see advisor_msg.txt)**: borrow SpacemiT K1 / SiFive P550 / FireSim-AWS from advisor. Unblocks real-silicon Mo 10 numbers. ~6 mo timeline. If granted, drops the gem5-only fallback.
+
+**Path B (simulation, primary)**: gem5 SE + Chipyard FireSim for Saturn SoC. Workshop-OK per MLArchSys norms (Titopoulos precedent simulator-only got published). Conference-grade if Y2 adds real silicon.
+
+**Path C (kept for reference, NOT pursued)**: $200 hardware (BPI-F3 + power meter + microSD) — declined 2026-05-16 in favor of advisor-borrow. Re-open if Path A fails.
+
+## Critical-path warnings
+
+- **Verilator too slow for end-to-end Llama.** Microbench only on Verilator. FireSim by month 8.
+- **ASIC synth = long pole.** OpenROAD/Yosys on a Chipyard SoC is 2-4 wk wall time after RTL stable. Start month 9.
+- **Energy methodology consistency**: K1 borrow (if granted) = full-board power; FireSim = chip-only. Pick one frame for the abstract; footnote the delta.
+- **NVFP4 calibration**: needs ARCQuant tooling OR hand-rolled NVFP4 quantizer on Llama-3.2-1B before perplexity numbers are real. Don't wait until Mo 10 to discover quant calibration matters.
+- **Saturn FU integration risk**: the `FunctionalUnitFactory` pattern is from project memory; verify against current `saturn-vectors` source before Mo 3.
+- **Exo `@instr` precedent**: Exo trunk added ARM SVE May 2025 but NO RVV yet. If Ragan-Kelley group publishes Exo-RVV before our Mo 8, the compiler-co-design lead weakens. Set arXiv keyword alerts; email Exo authors early as collaboration / heads-up.
+- **VMXDOTP follow-up risk**: Benini group (VEXP, VMXDOTP) ships RVV-customs-for-ML papers regularly. Plausibly an attention-themed sequel for HPCA/MICRO 2027 timed close to our submission. Differentiate hard on (a) NVFP4 vs MX, (b) fused FA vs unfused GEMM, (c) Exo vs hand intrinsics, (d) Saturn vs Spatz, (e) Llama-3.2-1B vs DeiT.
+
+## Validation checkpoints (sync'd with handoff + project memory)
+
+| Mo (Y1) | Question | Action on failure |
+|---|---|---|
+| 2 (Jul 2026) | NVFP4 K/V reduces decode BW ≥30% vs FP16 on Saturn-sim? | Diagnose dequant lane overhead; if upper bound <30%, pivot to widening options B/C/D. |
+| 4 (Sep 2026) | Precision-routing FU area ≤10% of Saturn @ 16nm est? | Cut FU lane count or share `vfexp` polynomial FMA with existing Saturn FMA. |
+| 6 (Nov 2026) | Hand-coded mixed-prec FA on Saturn+new-FU ≥1.5× SpacemiT K1 FP16 FA at iso-VLEN? | Optimize critical-path lane (likely vfexp polynomial degree or NVFP4 unpack stream). |
+| 8 (Jan 2027) | Exo-generated mixed-prec FA within 10% of hand-coded? | If parity fails, drop compiler-co-design lead; pivot paper around hand-coded kernels + RTL (weaker pitch but shippable). |
+| 10 (Mar 2027) | E2E Llama-3.2-1B Saturn-mixed-prec ≥1.5× K1-SpacemiT-FP16 at iso-power? | Re-check perplexity calibration; if Mo 10 fails but BW/area both pass, framework-as-headline still works. |
+
+**Failed checkpoint → replan, don't push through.**
+
+## Old vfexp-centric measurements (DELETED 2026-05-16 PM)
+
+The previous plan's items 4-7 ("vfexp FU: cycle count, latency, area" / "PPA delta: Saturn + vfexp vs unmodified Saturn" / "Exo-generated kernel vs hand-coded RVV intrinsics parity" / "Per-op bottleneck profile in upstream llama.cpp RVV — proves softmax/exp is the bottleneck") have been absorbed into new items 5-7 (precision-routing FU, PPA, parity) and item 8 (perplexity, NEW). Item 7 of the old plan — "proves softmax/exp is the bottleneck" — is **deleted entirely** because the premise (scalar softmax fallback) is no longer true in upstream llama.cpp. See `[[feedback-recheck-upstream-state]]`.
+
+The old "Start-now: SpacemiT K1 baseline" shopping list section has been preserved in this file's "Path C" entry above, for reference if Path A fails AND user budget changes.

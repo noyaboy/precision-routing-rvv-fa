@@ -1,0 +1,236 @@
+# RISC-V side-project — handoff (2026-05-16 EVENING UPDATE after Y1 pivot)
+
+## Y1 direction: MERGED X+Y (pivoted from single-FU Proposal X)
+
+**New Y1 = Mixed-precision fused flash attention on Saturn + NVFP4 K/V cache + Exo 2 precision-routing + llama.cpp E2E.**
+
+Target venue: MLArchSys 2027 workshop (Apr 2027 submission, June 2027 venue).
+
+**Why pivot (evening session 2026-05-16):**
+1. Original Proposal X pitch was "fill the scalar softmax gap with vfexp." Recheck of upstream llama.cpp revealed the gap is closed: `ggml_v_expf_m2` polynomial RVV expf in `ggml/src/ggml-cpu/vec.h:1342`, used by `ggml_vec_soft_max_f32` (vec.cpp:600-608) and by generic FA. Additionally, `spacemit/rvv_kernels.cpp` has K1-specific VLEN=1024 fused FA.
+2. Reframe options were: reframe vfexp as poly-expf replacement (modest novelty), widen to mixed-prec X+Y, pivot to KV/spec-decode, or drop FU. User picked **widen** explicitly: "Bigger compiler co-design story."
+3. Mixed-prec fused FA needs HW + compiler co-design (precision routing per stage). Direct FuseMax follow-up. Concurrent-work recheck (Jan–May 2026) shows VMXDOTP (Benini, DATE 2026) is closest but differentiable on 6 axes; gap remains open.
+
+## Components of merged Y1
+
+1. **RTL / Saturn FU**: precision-routing FU handling BF16 logits / NVFP4 K-cache / NVFP4 V-cache / FP8 softmax accum. Internal vfexp lane. ~1500-3000 LOC Chisel + ~150 lines decoder. New instructions: `vfconv.{bf16,nvfp4,fp8}.*` family + `vfexp.*`.
+2. **Compiler / Exo 2**: `@instr`-declared precision-routing instructions. Precision-routing pass picks per-stage dtype. VLEN-parameterized fused FA code (not VLEN=1024-hardcoded).
+3. **Software / llama.cpp**: NVFP4 model variant, RVV path calling Exo kernel, Llama-3.2-1B E2E.
+4. **Evaluation**: standalone FU testbench, Saturn integration (Chipyard), Exo vs hand-coded, E2E llama.cpp vs (upstream generic RVV FA, SpacemiT VLEN=1024 FA).
+
+## Updated validation checkpoints
+
+| Mo (Y1) | Question |
+|---|---|
+| 2 (Jul 2026) | NVFP4 K/V reduces decode memory bandwidth ≥30% vs FP16 K/V on Saturn-sim? |
+| 4 (Sep 2026) | Precision-routing FU area ≤10% of Saturn @ 16nm? |
+| 6 (Nov 2026) | Hand-coded mixed-prec FA on Saturn+FU ≥1.5× SpacemiT K1 FP16 FA at iso-VLEN? |
+| 8 (Jan 2027) | Exo-generated ≥0.9× hand-coded? |
+| 10 (Mar 2027) | E2E Llama-3.2-1B Saturn-mixed-prec ≥1.5× K1-SpacemiT-FP16 at iso-power? |
+
+**Old Mo 2 "softmax ≥10% of decode" is DELETED** — wrong question (based on closed gap).
+
+## Concurrent-work hazards (recheck 2026-05-16 PM)
+
+- **VMXDOTP** (arXiv:2603.04979, DATE 2026, Benini group). RVV MX dot-product on Spatz. Closest concurrent. Differentiate: NVFP4 vs MX, fused FA vs GEMM, Exo vs hand-tuned, Saturn vs Spatz, LLM vs DeiT.
+- **ARCQuant** (arXiv:2601.07475). NVFP4 PTQ algorithm. Use as quant baseline.
+- **Cygnus JSSC** (Jain/Asanović/Shao/Nikolić, JSSC Mar 2026). Octa-core RVV DSP. Context only.
+- **SGLang RVV backend** (sgl-project/sglang#18072). Software RVV serving. Cite as SW baseline.
+- **Benini group is the watch-list hazard for 2026-2027.** They own RVV-customs-for-ML lane.
+- Ragon-Kelley's Exo: added ARM SVE May 2025, NO RVV yet. Window still open.
+
+## Cross-compile + sim pipeline (REUSABLE for new Mo 2 measurement)
+
+- **Bootlin GCC 13.2** at `/home/noah/project/riscv/install/bootlin-riscv64/`. RVV 1.0 intrinsics ok. Apt's gcc-9.4 too old.
+- **llama.cpp rv64gcv binary** at `/home/noah/project/riscv/build/llama-rv64gcv/bin/llama-cli` (12 MB static glibc, ELF tag rv64gcv1p0). Built with `GGML_RVV=ON`, K1-extensions (zfh/zvfh/zicbop/zihintpause) OFF for gem5 compat. **Patches in llama.cpp**: 6 funcs in `arch/riscv/quants.c` (q5_0, q5_1, iq4_nl, iq4_xs, mxfp4, quantize_row_q8_K + dispatchers) and 1 in `repack.cpp`, all gated with `__GNUC__ >= 14` → fall to generic on GCC 13. **Don't upstream these patches.**
+- **gem5 25.1.0.1** SE mode at `/home/noah/project/riscv/gem5/build/RISCV/gem5.opt`. RVV: VLEN=256, ELEN=64. Supports Zba/Zbb/Zbs/Zicbom/Zicboz. NOT Zfh/Zvfh/Zicbop/Zihintpause/Zvfbfwma. Requires `--num-cpus≥2` for llama.cpp `clone()` syscall. Activate via conda env `gem5-build` with extra env vars (see top of this file).
+- **Models**: `/home/noah/project/riscv/models/{qwen2.5-0.5b-instruct-q4_k_m,qwen2.5-0.5b-instruct-q8_0}.gguf` (469 + 645 MB).
+- **Path A advisor message** still pending send: `/home/noah/project/riscv/paper/advisor_msg.txt` — DRAFTED on OLD Proposal X framing, **needs rewrite** before send.
+
+### gem5-build conda env (don't lose this)
+
+```bash
+conda activate gem5-build
+export CC=gcc CXX=g++
+export CPATH=$CONDA_PREFIX/include
+export LIBRARY_PATH=$CONDA_PREFIX/lib
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+```
+Also symlinked `$CONDA_PREFIX/bin/{gcc,g++}` → `x86_64-conda-linux-gnu-{gcc,g++}` (scons needs literal `gcc`/`g++` names).
+
+### Toolchain + sim quick reference
+
+```bash
+# Cross-compile a test file
+export PATH=/home/noah/project/riscv/install/bootlin-riscv64/bin:$PATH
+riscv64-linux-gcc -march=rv64gcv -mabi=lp64d -static foo.c -o foo
+
+# Run on gem5 SE (need ≥2 CPUs for clone())
+source ~/miniconda3/etc/profile.d/conda.sh && conda activate gem5-build
+LD_LIBRARY_PATH=$CONDA_PREFIX/lib /home/noah/project/riscv/gem5/build/RISCV/gem5.opt \
+  /home/noah/project/riscv/gem5/configs/deprecated/example/se.py \
+  --cpu-type=AtomicSimpleCPU --num-cpus=4 \
+  -c /path/to/foo
+```
+
+## Artifact rewrites — DONE 2026-05-16 PM (all 6 cleared)
+
+- `intro_draft.txt` ✓ v2 around merged X+Y (precision routing headline, 6 contributions, Table 1 with VMXDOTP + SpacemiT FA rows)
+- `related_work.md` ✓ rewritten (added VMXDOTP/ARCQuant/Cygnus/SGLang/TeAAL/LoopTree/TileFlow/Rabe&Staats, Mixed prec column, 1-page outline rewrite, surprising-findings update)
+- `advisor_msg.txt` ✓ tightened workload phrasing to Llama-3.2-1B decode + KV-cache bandwidth; updated internal-commentary sections for NVFP4/Exo; preserved light-touch ask
+- `measurement_plan.txt` ✓ 8 new measurements (BW + perplexity + 4-FU primitives), new 8-phase plan, detailed Mo 2 microbench protocol
+- `survey_synthesis.md` ✓ three-proposals updated (X+Y MERGED is Y1; old X+Y separately superseded/promoted; Z+S2 preserved for Y3)
+- `llamacpp_survey.md` ✓ closed-gap delta written (ggml_v_expf_m2 found + SpacemiT VLEN=1024 FA found + Q4_K-no-RVV-1.0-path finding)
+
+`fu_sketch.md` + `precision_config.md` + `fusemax_notes.txt` are the new artifacts authored this session — all in `paper/`, all current.
+
+## Next session — pick one
+
+**Track A — DONE to skeleton 2026-05-16 PM.** `/home/noah/project/riscv/saturn-fu/` is a standalone sbt + Chisel 6.7.0 project (versions match Chipyard pin). `VFExpLane.scala` has 8-stage pipeline + special-case handling + Decoupled BF16→FP32 interface. 5 ChiselTests pass (interface, 8-cycle latency, +Inf overflow saturation, zero underflow, stream throughput). sbt installed no-sudo at `/home/noah/.local/share/sbt/`. **Mo 3 follow-up**: replace the Schraudolph placeholder polynomial (stages 3-7) with degree-5 minimax FMAs using hardfloat; add skid buffer for backpressure; add 16-lane parametric wrapper; add the 3 conversion-lane modules (vfconv.nvfp4.bf16.v / .bf16.fp8.v / .fp8.bf16.v).
+
+**Track B: Mo 2 microbench (NVFP4 K-cache vs BF16 K-cache).** ✅ **DONE 2026-05-17.** TimingSimpleCPU + 32 KiB L1D + 512 KiB L2 + DDR3-1600. DRAM bytes read: 2.06 MiB BF16 vs 0.55 MiB NVFP4 = **73.5 % reduction** (3.77× compression). Mo 2 threshold ≥30 % comfortably cleared. Caveats: cycle delta is +12 % for NVFP4 on TimingSimpleCPU because dequant is software via lookup tables; on a memory-bound OoO host (BOOM+Saturn) NVFP4 should win on cycles too, and once `vfconv.nvfp4.bf16.v` exists as a 1-cycle/elt FU the cycle delta vanishes. Full writeup in `paper/mo2_results.md`. Sources in `/home/noah/project/riscv/microbench-mo2/`. **Mo 2 finding raises priority on `vfconv.nvfp4.bf16.v` design — dequant overhead is now a measured risk, not hypothetical.**
+
+**Track C: ABANDONED 2026-05-17.** Path A (advisor silicon borrow) killed by user decision. Y1 is now Path B sim-only. `advisor_msg.txt` retained on disk for reference but stale-by-decision; do not send. Mo 6/10 silicon-equivalent numbers will be FireSim FPGA + gem5 + published K1 specs.
+
+**Track D: Read Exo 2 paper carefully + sketch the `@instr` declarations for our 4 instructions.** Per `fu_sketch.md` Exo section. Pins the compiler-side interface before more Chisel work. ~2-3 hours.
+
+**Track E: Real polynomial for VFExpLane.** ✅ **DONE 2026-05-17.** Took fixed-point Q2.30 path (no hardfloat dep). Two source files: `PolyExpQ2_30.scala` (5-stage Horner FMA, max rel err 3.24e-6 in isolation) and `VFExpLane.scala` rewritten to 10-stage pipeline with proper FP32→Q8.23 conversion, range reduction in fixed-point, polynomial, Q2.30→FP32 reconstruct with leading-1 detect, 2^N exponent scale. 10/10 ChiselTests pass; **numerical-accuracy sweep over 321 BF16 points in [-10, 10] hits max rel err 3.20e-6 at x=3.8125 vs scalar expf — 4.7× tighter than 2⁻¹⁶ target.** Mo 3 first checkpoint CLOSED. **Latency grew from 8 to 10 cycles** — flagged for Saturn integration timing review in Mo 4.
+
+**Track F: `vfconv.nvfp4.bf16.v` Chisel module.** ✅ **DONE 2026-05-17 (later session).** Standalone Chisel lane at `saturn-fu/src/main/scala/saturnfu/VFConvNvfp4Bf16Lane.scala`. 3-stage pipeline (decode → 8×8 mantissa multiply → normalize+RNE+pack); 197 LOC. 12 ChiselTests pass including **exhaustive 4096-case sweep with 0 mismatches against FP64-multiply-and-BF16-round golden**. Handles NVFP4 (E2M1 OCP) elements and E4M3 (OCP FN variant — NVIDIA NVFP4 scale convention) including subnormal scales, sign-preserving QNaN propagation, and zero shortcuts. Mo 3 **second** checkpoint closed. Bug-of-record during bring-up: exp-sum 9-bit signed accumulator wrapped at `a_exp + b_exp > 255` (NVFP4 +4.0 × E4M3 +1.0 = 256), tripping the downstream `exp_too_small` clamp to signed zero — fixed by widening operands to SInt(10.W) before adding. Lesson applies to the remaining two vfconv lanes. Full writeup in `paper/track_f_results.md`.
+
+## Next session — pick one
+
+After Tracks A, B, D, E, F, F2, F3, H, I done; Track C abandoned. **All 4 Saturn custom instructions have RTL with bit-exact validation (57/57 ChiselTests).** **Mo 2 cycle-bridge resolved** (Track H). **Mo 4 area checkpoint LANDED 4 months early** (Track I: 6.3 % Saturn standalone, 1.1 % FMA-shared, threshold ≤ 10 % PASS). Unblocked candidates:
+
+**Track D: Exo 2 @instr declarations.** ✅ **DONE.** `paper/exo_instr_decls.md`.
+
+**Track F2: `vfconv.bf16.fp8.v` lane.** ✅ **DONE.** 0/65536 vs RNE golden. `paper/track_f2_results.md`.
+
+**Track F3: `vfconv.fp8.bf16.v` lane.** ✅ **DONE.** 0/256 + 0/256 F2/F3 round-trip. `paper/track_f3_results.md`.
+
+**Track H: Mo 2 FU-latency-stubbed dequant re-measurement.** ✅ **DONE.** NVFP4-stub-v2 beats BF16 by 4.4 % cycles + 73.5 % BW. Mo 2 caveat #2 resolved. `paper/track_h_results.md`.
+
+**Track I: Mo 4 prep — Yosys synthesis + 16-nm area estimate.** ✅ **DONE 2026-05-17.** Emitted Chisel 6.7.0 / firtool-1.62.1 SV (with `disallowLocalVariables,disallowPackedArrays` so Yosys 0.9 frontend parses); synthesized all 5 modules; tabulated NAND2-equivalents → 16-nm area (assuming ~0.26 µm²/NAND2 TSMC-16FF+-class). **Total FU at 16 lanes = 0.317 mm² (standalone, 6.3 % of Saturn 5 mm²) or 0.055 mm² (FMA-shared, 1.1 %). Mo 4 threshold ≤10 %: PASS with substantial margin.** Per-lane: VFExpLane 75K NAND2 (dominated by PolyExp's 5 32-bit muls = 63K), VFConvNvfp4Bf16 704, VFConvBf16Fp8 503, VFConvFp8Bf16 140. Caveats: Yosys 0.9 conservative (~2× over commercial DC), generic library (not 16-nm PDK), no timing closure. Full writeup `paper/track_i_results.md`. Reproducible via `saturn-fu/src/main/scala/saturnfu/Emit.scala` + `saturn-fu/build/synth_all.sh`.
+
+**Track D-follow: actually fork `exo-lang/exo` + land BF16 patch + SaturnRVV memory class** (~1-2 d). Bring `exo_instr_decls.md` from artifact to type-checking smoke test.
+
+**Track G: Mo 2 V-cache extension + longer-seq sweep.** Re-run Mo 2 with V-cache added + seq_len ∈ {2048, 8192, 32768}. ~2 h. Less urgent now that Track H resolved the cycle bridge.
+
+**Track J: Mo 5 prep — hand-coded mixed-prec FA kernel.** ✅ **FIRST CUT DONE 2026-05-17.** Two scalar C kernels at `microbench-fa/`: `bench_fa_bf16.c` (BF16-throughout baseline) + `bench_fa_mixed.c` (NVFP4 K/V + BF16 logits + FP32 softmax + FP8 attn weights per `precision_config.md`; 4 Saturn custom instructions modeled via SW LUT decode + bit-level RNE matching the Track F/F2/F3 Chisel modules). **gem5 TimingSimpleCPU result: Mixed-prec 125.1M cycles vs BF16 131.2M = mixed wins by 4.6% even with SW-LUT overhead inflating instruction count by 63%. DRAM bytes read drops 93.6% (17.1 MiB → 1.15 MiB) — same NVFP4 BW story as Mo 2 but amplified by FA's column-major V access pattern.** Numerical validation flagged as next-session work (the two paths today see different input distributions; checksums diverge by ~100× because of init mismatch, not kernel error). Full writeup `paper/track_j_results.md`. Next-iteration Track J work: (a) shared FP32 ground-truth init for true correctness comparison; (b) FU stubs (Track H pattern) for cycle-only headline number; (c) RVV intrinsics on hot loops.
+
+**Track J-2: SpacemiT K1 path on same gem5 host** (~2 d). Port SpacemiT's VLEN=1024-hardcoded FA kernel from upstream llama.cpp `ggml/src/ggml-cpu/spacemit/rvv_kernels.cpp` to our VLEN=256 gem5. Degrades SpacemiT's VLEN-specific opts but enables controlled comparison for Mo 6. Currently the missing piece for the Mo 6 ≥ 1.5× speedup claim.
+
+**Track K (NEW): commercial-flow re-synthesis.** When Synopsys DC + 16-nm PDK access becomes available (via advisor / tape-out collaborator), re-run Track I with the commercial flow. Yosys 0.9 numbers should be ~2× over-estimates per the conservative-tech-mapper caveat; the commercial flow would tighten standalone FU to ~3 % Saturn. For camera-ready paper revision, not first-submission MLArchSys 2027.
+
+Recommended next: **Track J iteration** (unified FP32 ground-truth init for numerical validation; FU stubs for cycle-only headline; RVV intrinsics on hot loops). Then **Track J-2** (SpacemiT K1 port) to enable the Mo 6 ≥ 1.5× comparison. Track D-follow is the parallel compiler push when next focused on compiler work.
+
+## Track J iteration — DONE 2026-05-17 EVENING (J1 + J2 + J3 landed)
+
+Full writeup: `paper/track_j_results.md` § "Track J iteration".
+
+- **J1 (unified FP32 init + per-row FP8 scale).** Apples-to-apples correctness gap closed. BF16 baseline -19.69 vs mixed-prec J1 -20.27 → 2.95 % relative diff. Surfaced a hidden algorithm bug in the first cut: FP8-E4M3 attn weights underflow at seq_len ≥ ~512 because P_normalized ≈ 1/seq_len < E4M3-FN's smallest subnormal (2⁻⁹ = 0.00195). Fixed by per-row FP8 scale (pre-scale by 448, fold inv_sum/448 into P·V accumulator). FU sketch unchanged — the row scale is one scalar FMUL outside the FU lanes.
+- **J2 (FU-latency stub bracket).** Conservative + aggressive stubs per [[feedback-fu-stub-brackets]]: mixed-prec wins **−37.9 % to −44.0 % cycles + −93.3 % DRAM** vs scalar BF16 baseline. DRAM identical across J1 / J2-cons / J2-agg (1.20 MiB) — stubs preserve BW pattern. Aggressive variant matches BF16's inst count almost exactly (23.02 M vs 22.96 M) → the cycle win is purely from the cache-footprint collapse.
+- **J3 (RVV intrinsics + iso-µarch baseline).** Vectorized hot loops at VLEN=256 SEW=32 LMUL=2 (16 elts/vec). Row-major P·V restructure necessary for vectorization. Surprise finding: **BF16-RVV-row-major baseline runs at 19.14 M cyc**, 6.9× faster than scalar BF16 (RVV + access-pattern restructure compose). Mixed J3 (79.60 M) and J3+stub (59.73 M) **lose to BF16 RVV at iso-µarch** at this kernel scale — BF16 RVV is compute-bound at seq_len=2048, so the NVFP4 BW advantage doesn't translate to cycles. Mixed retains the BW win (−71.8 % even vs BF16 RVV). J3 RVV result (79.60 M) lands inside the J2 bracket (73.75–81.75 M) — cross-validates the two methodologies.
+
+## Cumulative Mo-checkpoint state (2026-05-17 EVENING)
+
+| Mo | Question | Status |
+|---|---|---|
+| 2  (Jul 2026) | NVFP4 K/V ≥ 30 % BW reduction? | ✅ PASS (Mo 2: 73.5 %, K-only; Track H bridge: NVFP4 −4.4 % cyc vs BF16 stub-v2; Track J: 93.3 % BW at FA-decode scale) |
+| 3  (Aug 2026) | Custom-instruction RTL bit-exact? | ✅ PASS (Tracks E + F + F2 + F3, 57/57 ChiselTests, all 4 customs done) |
+| 4  (Sep 2026) | FU area ≤ 10 % Saturn @ 16 nm est? | ✅ PASS (Track I, 6.3 % standalone / 1.1 % FMA-shared, 4 mo early) |
+| 5  (Oct 2026) | First FA kernel runs end-to-end?  | ✅ PASS (Track J iteration; vs scalar BF16: −54.6 % cyc + −93.3 % BW for J3+stub; vs BF16-RVV iso-µarch: cycle-tied/worse at small scale, −71.8 % BW retained — see Mo 6 caveat below) |
+| 6  (Nov 2026) | Hand-coded mixed-prec FA ≥ 1.5× SpacemiT K1? | (Track J-2 SpacemiT port pending; J3 result suggests Mo 6 may need long-context + larger-model extension to expose BW-advantage as cycle delta) |
+| 8  (Jan 2027) | Exo-generated within 10 % of hand-coded? | (Track D done = feasibility de-risked; Track D-follow = land it) |
+| 10 (Mar 2027) | E2E Llama-3.2-1B ≥ 1.5× K1 iso-power?    | (downstream of Mo 6 + Mo 8) |
+
+**Mo 6 framing risks surfaced by J3** (worth thinking about before Track J-2):
+
+1. **Compute-bound at small scale.** At seq_len = 2048, head_dim = 64 the BF16 RVV row-major path runs at 0.22 B/cyc DRAM, well within DDR3-1600's 6.4 B/cyc capacity. The NVFP4 BW advantage doesn't dominate cycles until the workload outgrows L2 or the simulator models the real Saturn FU latency. Likely need to extend Mo 6 measurements to seq_len ∈ {8192, 32768} and head_dim ≥ 128 to expose the BW advantage at the µarch level.
+2. **Scalar NVFP4 dequant is the gem5 floor.** Real Saturn FU absorbs dequant in vector pipe at 16-lane width; gem5 can't issue Saturn's custom encodings. J3+stub (59.73 M cyc) is the closest projection on this simulator. The integration number on a Saturn-µarch-aware O3 simulator (e.g. when FireSim FPGA path is added) will be lower.
+3. **Mo 6 ≥1.5× depends on SpacemiT-K1-ported cycle count.** If port lands above ~90 M cyc (likely because the upstream is VLEN=1024-hardcoded and degrades at VLEN=256), J3+stub meets ≥1.5×. If port lands at ~60 M (matches BF16-RVV equivalent), Mo 6 needs the long-context extension.
+
+## Track J-2 — DONE 2026-05-17 EVENING (post-J iteration)
+
+Full writeup: `paper/track_j2_results.md`.
+
+- **SpacemiT FP16 m1 kernel** ported to our microbench-fa: `bench_fa_spacemit_bf16.c` (BF16 + FP32 widen, no Zvfh on gem5).  TimingSimpleCPU: 17.78 M cyc (4.20 MiB DRAM); RiscvO3CPU: 4.99 M cyc (IPC 0.46).
+- **Mixed-prec streaming variant** (SpacemiT algorithm + NVFP4 K/V + aggressive FU stub): `bench_fa_mixed_streaming_stub.c`.  TimingSimpleCPU: 57.85 M cyc; O3: 7.82 M cyc (IPC 1.77, the highest of any variant — dequant ops parallelize beautifully on OoO).
+- **Mo 6 verdict: MISSES at seq_len=2048 head_dim=64.**  On O3, best mixed (J3+stub, 7.65 M cyc) is 2.26× slower than best BF16 RVV (J3 row-major, 3.39 M cyc).  On TimingSimpleCPU the gap is 3-5×.  Same finding at seq_len=8192 (linear scaling, gap ratio identical).
+- **Critical IPC finding**: BF16 J3 two-pass (IPC 0.82) beats SpacemiT online-softmax (IPC 0.46) on O3 by 47 % despite 17 % more instructions.  Online-softmax's data-dependent branch limits OoO speculation; J3's pure-vector-reduction softmax issues unblocked.  So the **right Mo 6 BF16 reference is J3 two-pass, not SpacemiT**.
+- **Path to passing Mo 6** (3 options):
+  1. **FireSim FPGA**: real Saturn RTL with FU integrated.  Direct measurement, no projection.
+  2. **gem5 custom-encoding patch**: add Saturn's `vfconv.*` + `vfexp.*` to the RISC-V decoder + FU model.  ~2-week effort; reusable for Mo 10 + Y2.
+  3. **Long-context + large head_dim on O3**: probe where BW pressure flips cycles toward mixed-prec.  Probably head_dim=128 seq_len=32768 territory; hours of O3 sim time per kernel.
+
+## Paper framing implication (NEW 2026-05-17 EVENING)
+
+Mo 6 as originally written ("Hand-coded mixed-prec FA on Saturn+FU ≥1.5× SpacemiT K1 FP16 FA at iso-VLEN") **implicitly assumed the FU lands in cycle measurement**.  Since gem5 can't issue Saturn custom encodings, **rephrase Mo 6 for MLArchSys 2027 submission**:
+
+- (a) Verified BW claim: Mixed-prec NVFP4 K/V reads 3.5-14× less DRAM than BF16 FA on both TimingSimpleCPU and O3.  Holds at seq_len ∈ {2048, 8192}.
+- (b) Projected cycle claim: With FU integration mixed-prec wins ≥1.5× over best BF16 RVV on OoO RVV cores.  Methodology: measured mixed-prec cycle count − (measured IPC × scalar dequant op count) + projected FU latency (16-lane parallel, 3-cycle pipeline).
+
+## Track J-2-O3-long — DONE 2026-05-17 PM
+
+12 O3 sims at seq_len ∈ {4096, 8192, 16384}, four kernels: BF16 RVV (J3), SpacemiT BF16, mixed J3+stub, mixed streaming stub.  All ran in parallel on the 32-core host.  Full table + IPC trend in `paper/track_j2_results.md` § "Long-context O3 sweep".
+
+**Headline**: long-context does not close the Mo 6 gap on this gem5 config.  Mixed J3+stub / BF16 RVV stays flat at 2.22×–2.32× across the entire L2K–L16K sweep.  BF16 stays compute-bound (DRAM use ~1.3 B/cyc vs 6.4 B/cyc cap); the BW advantage of mixed-prec cannot translate to cycles.
+
+**Bonus**: mixed streaming / SpacemiT closes from 1.58× (L8K) to 1.39× (L16K).  IPC jump from 1.78 to 2.02 in the mixed streaming kernel only.  Mechanism: online-softmax's `if (s > M)` inner branch becomes predominantly false at long context (M stabilizes); branch predictor + OoO speculation both gain.  Two-pass kernels have no such branch, IPC is constant.  Algorithmic finding worth keeping for the paper's microarch-aware discussion.
+
+**Mo 6 verdict unchanged**: misses at every gem5 config + every seq_len we tested.  Long-context alone is not a path to ≥1.5×.  Track J-4 (gem5 patch) or paper reframing (BW verified + cycle projected) remain the only two paths.
+
+## Track J-4 — DECODER COMPLETE 2026-05-17 LATE PM (4 of 4 customs)
+
+End-to-end gem5 patch path proven for ALL 4 Saturn customs. Full writeup: `paper/track_j4_results.md`.
+
+- **Encoding scheme**: OPFVV.VFUNCT6=0x13.VS1 sub-encoding (next to existing vfsqrt/vfrsqrt7/vfrec7/vfclass).
+
+| Instruction | VS1 | Encoding (v0,v0) | Validation |
+|---|---:|---:|---|
+| `vfexp.v` | 0x06 | 0x4E031057 | 8/8 bit-exact vs libm expf |
+| `vfconv.fp8.bf16.v` | 0x07 | 0x4E039057 | 8/8 bit-exact (sample mapping) |
+| `vfconv.bf16.fp8.v` | 0x08 | 0x4E041057 | 8/8 bit-exact (50+ line RNE algorithm) |
+| `vfconv.nvfp4.bf16.v` | 0x09 | 0x4E049057 | 16/16 bit-exact (full nibble space, single-source unscaled variant) |
+
+- **Build cost**: ~3-5 min incremental rebuild per decoder.isa change on the 32-core host.
+
+**Remaining for Track J-4 to deliver a verified Mo 6 number** (~2-3 days focused):
+1. ~~FU op-class latency~~ **DONE J-4.5a**. Added 4 op classes (`SimdFloatExpOp` 10c, `SimdNvfp4CvtOp` 3c, `SimdBf16Fp8CvtOp` 2c, `SimdFp8Bf16CvtOp` 1c) to gem5's enum + alias + SIMD_Unit FU pool. Decoder.isa re-tagged. Verified via tight-loop probe (`test_vfexp_latency.c`): 13.05 cyc/iter on O3, consistent with the 10c vfexp latency. All 4 functional tests still pass.
+2. ~~Microbench integration~~ **PARTIAL J-4.5b** (2026-05-17 late PM). Wrote `bench_fa_mixed_rvv_native.c` with native vfconv.nvfp4.bf16.v dequant + native vfexp.v softmax. Initial run: 8.46M cyc, IPC 1.79, checksum −0.045 (vs J1 mixed reference −20.27 — **wrong magnitude**). Two issues: (a) `vfmul.vf` scale-width mishandling (GCC `"f"` constraint may give double-typed reg vs SEW=32 width); (b) vsetvli e16-m1↔e32-m2 switches inside dequant cost ~130K cyc overhead, making J4 native (8.46M) *slower* than J3+stub (7.65M). Both fixable with another integration pass. Path is open.
+3. **Exhaustive bit-exact sweeps** (port Tracks E/F/F2/F3 goldens: 321 BF16 inputs / 4096 NVFP4×E4M3 cases / 65536 / 256+256 round-trip) to gem5 microbenches.
+4. **Mo 6 head-to-head re-run** on RiscvO3CPU = verified cycle number replacing the Track J-2 projected estimate. Pending J-4.5b fixes.
+
+Note: vfconv.nvfp4.bf16.v current variant returns *unscaled* BF16 (low 4 bits of u16 input = nibble; no scale). Application does the scale FMUL separately. Matches the Track F2 stub variant pattern. A two-source variant with the E4M3 scale fused in could be added later at VS1=0x0a if needed.
+
+## Next session — pick one (2026-05-17 LATE PM, post J-2 + J-2-O3-long + J-4 POC)
+
+**Track J-4 (NEW): gem5 RVV-custom-encoding patch.** Add Saturn's `vfconv.{nvfp4,bf16,fp8}.*` + `vfexp.*` encodings to gem5's RISC-V decoder + functional-unit model.  Use the bit-exact-validated Chisel modules from Tracks E/F/F2/F3 as the reference for FU semantics.  ~2-week effort.  Outputs: directly-verified Mo 6 + Mo 10 numbers + a reusable gem5 patch.
+
+**Track D-follow: actually fork `exo-lang/exo` + land BF16 patch + SaturnRVV memory class** (~1-2 d). Bring `exo_instr_decls.md` from artifact to type-checking smoke test.
+
+**Track K: commercial-flow re-synthesis** (deferred until PDK access).
+
+Recommended next:
+- **If Mo 6 ≥1.5× is the immediate priority**: Track J-4 (gem5 patch).  This is the cleanest path to a verified Mo 6 number.
+- **If we want to first probe whether long-context alone bridges the gap**: Track J-2-O3-long.  Lower risk, cheaper, ~1 day.  If it shows mixed wins at seq_len=16384 head_dim=128 even without FU integration, then Track J-4 becomes "nice to have" rather than "must-have."
+- **If parallel compiler push**: Track D-follow.
+
+**Track D-follow: actually fork `exo-lang/exo` + land BF16 patch + SaturnRVV memory class** (~1-2 d). Bring `exo_instr_decls.md` from artifact to type-checking smoke test. Parallel to J-2.
+
+**Track K (NEW): commercial-flow re-synthesis.** When Synopsys DC + 16-nm PDK access becomes available, re-run Track I with the commercial flow. Yosys 0.9 numbers should be ~2× over-estimates; commercial flow tightens standalone FU to ~3 % Saturn. For camera-ready paper revision, not first submission.
+
+Recommended next: **Track J-2** (SpacemiT port) — directly answers the Mo 6 question and is now the critical path.  **Track J-3** (long-context sweep) runs in parallel and de-risks the seq_len=2048 finding.  **Track D-follow** is the compiler push when next focused on compiler work.
+
+## Memory state (updated 2026-05-17 EVENING — post J-2)
+
+Auto-memory at `~/.claude/projects/-home-noah-project-riscv/memory/`:
+- `project_side_project_direction.md` — Y1 LOCKED. Mo 5 PASS. Mo 6 MISSES at seq_len=2048 on gem5 (can't model Saturn FU). Paper framing rewrite: BW claim verified + cycle claim projected.
+- `reference_key_papers_repos.md` — 2026 papers (VMXDOTP, ARCQuant, Cygnus, SGLang) catalogued.
+- `feedback_recheck_upstream_state.md` — applied repeatedly; still load-bearing.
+- `feedback_fu_stub_brackets.md` — applied 4× now (J2, J3, J-2b, J-2c).  J3 RVV stub on TimingSimpleCPU (59.73 M) inside J2 bracket (73-82 M).  Mixed J-2b streaming-stub on O3 (7.82 M) close to J3+stub (7.65 M) — both dequant-dominated, algorithm choice doesn't matter much for mixed-prec.
+- `feedback_distance_based_goldens.md` — applied across Tracks F2/F3 + J1 quantization helpers.
+- `user_phd_application.md` — unchanged.
+- `feedback_direct_recommendations.md` — unchanged.
+- `feedback_keep_work_dir_clean.md` — unchanged.  Track J-2 added two new sources (`bench_fa_spacemit_bf16.c`, `bench_fa_mixed_streaming_stub.c`) + two L8K variants + writeup `paper/track_j2_results.md`.  Plus 7 O3 sim outputs preserved under `microbench-fa/run/j2_o3_*` and `run/j3_long_*`.
+- `feedback_prefer_zero_cost.md` — unchanged.

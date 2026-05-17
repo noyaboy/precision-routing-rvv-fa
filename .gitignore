@@ -1,0 +1,43 @@
+# Other repos (tracked separately)
+gem5/
+llama.cpp/
+chipyard/
+exo/
+pk-src/
+spike-src/
+
+# Toolchains + downloads (regeneratable)
+install/
+models/
+
+# Build outputs + sim runs (regeneratable)
+build/
+m5out/
+scratch/
+
+# saturn-fu build artifacts (keep sources)
+saturn-fu/build/
+saturn-fu/target/
+saturn-fu/test_run_dir/
+saturn-fu/project/target/
+saturn-fu/project/project/
+
+# Microbench compiled binaries + sim runs (regeneratable)
+microbench-fa/bench_fa_*
+!microbench-fa/bench_fa_*.c
+microbench-fa/run/
+
+microbench-j4/test_v*
+!microbench-j4/test_v*.c
+microbench-j4/run_*/
+
+microbench-mo2/bench_*
+!microbench-mo2/bench_*.c
+microbench-mo2/run/
+
+# Editor + OS artifacts
+*.o
+*.swp
+.DS_Store
+__pycache__/
+*.pyc
