@@ -1,15 +1,18 @@
 # Track J — FA decode-step microbench (Mo 5/6 prep).
 #
-# Project default toolchain: Bootlin GCC 14.2 (bleeding-edge-2024.05-1)
-# at /tmp/bootlin-14/. -fno-tree-vectorize is REQUIRED for the native
-# bench under GCC 14 -O2 (see paper/gcc_bug_report.md). The flag is a
-# no-op (<2 % cycle delta) on the all-intrinsic baselines, so we apply
-# it uniformly for build consistency.
+# Default toolchain: Bootlin GCC 14.2 (bleeding-edge-2024.05-1,
+# `riscv64-lp64d--glibc--bleeding-edge-2024.05-1`). `-fno-tree-vectorize`
+# is REQUIRED for the native bench under GCC 14 -O2 (see
+# ../paper/gcc_bug_report.md). The flag is a no-op (<2 % cycle delta)
+# on the all-intrinsic baselines, so we apply it uniformly.
 #
-# Run: PATH=/tmp/bootlin-14/riscv64-lp64d--glibc--bleeding-edge-2024.05-1/bin:$PATH make
+# Build:
+#   PATH=/path/to/bootlin-riscv64-gcc14/bin:$PATH make
 #
-# To rebuild on the original GCC 13.2 (with workaround already in
-# place + auto-vec on), override: PATH=/home/noah/project/riscv/install/bootlin-riscv64/bin:$PATH make CFLAGS="-O2 -march=rv64gcv -mabi=lp64d -Wall -static -Wno-unused-result -I../microbench-mo2"
+# To rebuild against the original GCC 13.2 (Bootlin 2024.02-1, with the
+# pre-widen-Q workaround in the source + auto-vec on), override CFLAGS:
+#   PATH=/path/to/bootlin-riscv64-gcc13/bin:$PATH \
+#     make CFLAGS="-O2 -march=rv64gcv -mabi=lp64d -Wall -static -Wno-unused-result -I../microbench-mo2"
 
 CC      := riscv64-linux-gcc
 ARCH    ?= rv64gcv

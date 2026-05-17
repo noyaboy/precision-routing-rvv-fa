@@ -1,6 +1,6 @@
 # Saturn precision-routing FU — block sketch (2026-05-16 PM)
 
-Anchors the RTL work for merged X+Y Y1. Locked precision config in `/home/noah/project/riscv/paper/precision_config.md`.
+Anchors the RTL work for merged X+Y Y1. Locked precision config in `./paper/precision_config.md`.
 
 ## High-level block diagram
 

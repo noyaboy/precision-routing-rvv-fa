@@ -104,8 +104,8 @@ fraction of total cycles (most cycles are still memory + FMA). We did
 ## Reproducibility
 
 ```bash
-cd /home/noah/project/riscv/microbench-mo2
-PATH=/home/noah/project/riscv/install/bootlin-riscv64/bin:$PATH make
+cd ./microbench-mo2
+PATH=/path/to/bootlin-riscv64/bin:$PATH make
 
 # Pre-existing
 ls bench_fp16 bench_nvfp4
@@ -115,12 +115,12 @@ ls bench_nvfp4_stub bench_nvfp4_stub2
 source ~/miniconda3/etc/profile.d/conda.sh && conda activate gem5-build
 for b in nvfp4_stub nvfp4_stub2; do
   mkdir -p run/$b && cd run/$b
-  LD_LIBRARY_PATH=$CONDA_PREFIX/lib /home/noah/project/riscv/gem5/build/RISCV/gem5.opt \
-    --outdir=. /home/noah/project/riscv/gem5/configs/deprecated/example/se.py \
+  LD_LIBRARY_PATH=$CONDA_PREFIX/lib $GEM5_DIR/build/RISCV/gem5.opt \
+    --outdir=. $GEM5_DIR/configs/deprecated/example/se.py \
       --cpu-type=TimingSimpleCPU --num-cpus=4 \
       --caches --l1d_size=32KiB --l1i_size=32KiB \
       --l2cache --l2_size=512KiB --mem-size=512MB \
-      -c /home/noah/project/riscv/microbench-mo2/bench_$b
+      -c ../../bench_$b
   cd ../..
 done
 ```

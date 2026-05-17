@@ -134,7 +134,7 @@ handoff list):
 
 - DUT: `saturn-fu/src/main/scala/saturnfu/VFConvFp8Bf16Lane.scala` (110 LOC)
 - Tests: `saturn-fu/src/test/scala/saturnfu/VFConvFp8Bf16LaneTest.scala` (331 LOC)
-- Run: `cd saturn-fu && PATH=/home/noah/.local/share/sbt/bin:$PATH sbt test`
+- Run: `cd saturn-fu && PATH=$HOME/.local/share/sbt/bin:$PATH sbt test`
 - Spec: `paper/fu_sketch.md §"FP8-E4M3→BF16 dequant lane"` (1-cycle target)
 - Compiler-side: `paper/exo_instr_decls.md §5.3` (`@instr` decl)
 - Forward direction: `paper/track_f2_results.md` (the F2 quant lane this inverts)

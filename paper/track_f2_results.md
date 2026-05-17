@@ -165,7 +165,7 @@ unknown.
 
 - DUT: `saturn-fu/src/main/scala/saturnfu/VFConvBf16Fp8Lane.scala` (192 LOC)
 - Tests: `saturn-fu/src/test/scala/saturnfu/VFConvBf16Fp8LaneTest.scala` (433 LOC)
-- Run: `cd saturn-fu && PATH=/home/noah/.local/share/sbt/bin:$PATH sbt test`
+- Run: `cd saturn-fu && PATH=$HOME/.local/share/sbt/bin:$PATH sbt test`
 - Spec: `paper/fu_sketch.md §"BF16→FP8-E4M3 quant lane"` (2-cycle target)
 - Compiler-side: `paper/exo_instr_decls.md §5.2` (`@instr` decl)
 - Precision config: `paper/precision_config.md` (FP8-E4M3 attn-weights line)

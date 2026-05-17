@@ -121,8 +121,8 @@ floor). Both projections clear Mo 4 by large margins.
 
 ```bash
 # 1. Emit Verilog (Chisel 6.7.0 → CIRCT firtool → SV-2005-compatible Verilog)
-cd /home/noah/project/riscv/saturn-fu
-PATH=/home/noah/.local/share/sbt/bin:$PATH \
+cd ./saturn-fu
+PATH=$HOME/.local/share/sbt/bin:$PATH \
   sbt "runMain saturnfu.Emit"
 # Outputs to ./build/<ModuleName>/<ModuleName>.sv with firtool option
 # -lowering-options=disallowLocalVariables,disallowPackedArrays so Yosys 0.9
@@ -133,7 +133,7 @@ PATH=/home/noah/.local/share/sbt/bin:$PATH \
 # Per-module logs: ./build/synth_<Module>.log
 
 # 3. NAND2-equivalent + 16 nm area rollup
-python3 /home/noah/project/riscv/saturn-fu/build/nand2_count.py
+python3 ./saturn-fu/build/nand2_count.py
 ```
 
 ## File pointers

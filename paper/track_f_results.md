@@ -3,7 +3,7 @@
 ## Verdict: PASS — bit-exact dequant across all 4096 (elt, scale) codepoints
 
 The first conversion-lane FU primitive (`vfconv.nvfp4.bf16.v`) is implemented
-in standalone Chisel at `/home/noah/project/riscv/saturn-fu/`, paired with
+in standalone Chisel at `./saturn-fu/`, paired with
 `PolyExpQ2_30` and `VFExpLane` from Mo 3 first checkpoint. Mo 3 second
 checkpoint (the second FU primitive) is closed.
 
@@ -201,8 +201,8 @@ Mo 3 EOM checkpoint.
 ## Reproducibility
 
 ```bash
-cd /home/noah/project/riscv/saturn-fu
-PATH=/home/noah/.local/share/sbt/bin:$PATH sbt "testOnly saturnfu.VFConvNvfp4Bf16LaneSpec"
+cd ./saturn-fu
+PATH=$HOME/.local/share/sbt/bin:$PATH sbt "testOnly saturnfu.VFConvNvfp4Bf16LaneSpec"
 ```
 
 Sources:
@@ -212,7 +212,7 @@ Sources:
 
 Versions:
 - Chisel 6.7.0, ChiselTest 6.0.0, Scala 2.13.16 (Chipyard pin)
-- sbt 1.10.6 (no-sudo install at `/home/noah/.local/share/sbt/`)
+- sbt 1.10.6 (no-sudo install at `$HOME/.local/share/sbt/`)
 
 Run time: ~7 seconds total (3 specs, 22 tests, including the 4096-case
 exhaustive sweep).

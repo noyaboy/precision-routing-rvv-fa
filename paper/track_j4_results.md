@@ -326,22 +326,22 @@ sub-opcode moving to a higher bit field).
 ## Reproducibility
 
 ```bash
-cd /home/noah/project/riscv/gem5
+cd ./gem5
 source ~/miniconda3/etc/profile.d/conda.sh && conda activate gem5-build
 export CC=gcc CXX=g++ CPATH=$CONDA_PREFIX/include \
        LIBRARY_PATH=$CONDA_PREFIX/lib \
        LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
 scons build/RISCV/gem5.opt -j32 --quiet
 
-cd /home/noah/project/riscv/microbench-j4
-PATH=/home/noah/project/riscv/install/bootlin-riscv64/bin:$PATH \
+cd ./microbench-j4
+PATH=/path/to/bootlin-riscv64/bin:$PATH \
   riscv64-linux-gcc -O2 -march=rv64gcv -mabi=lp64d -static \
   test_vfexp.c -o test_vfexp -lm
 
 mkdir -p run_test_vfexp && cd run_test_vfexp
 LD_LIBRARY_PATH=$CONDA_PREFIX/lib \
-  /home/noah/project/riscv/gem5/build/RISCV/gem5.opt --outdir=. \
-  /home/noah/project/riscv/gem5/configs/deprecated/example/se.py \
+  $GEM5_DIR/build/RISCV/gem5.opt --outdir=. \
+  $GEM5_DIR/configs/deprecated/example/se.py \
   --cpu-type=TimingSimpleCPU --num-cpus=4 --mem-size=512MB \
-  -c /home/noah/project/riscv/microbench-j4/test_vfexp
+  -c ../test_vfexp
 ```

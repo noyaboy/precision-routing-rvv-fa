@@ -300,13 +300,13 @@ directly, **rephrase as two claims** for the MLArchSys 2027 submission:
 ## Reproducibility
 
 ```bash
-cd /home/noah/project/riscv/microbench-fa
-PATH=/home/noah/project/riscv/install/bootlin-riscv64/bin:$PATH make
-PATH=/home/noah/project/riscv/install/bootlin-riscv64/bin:$PATH \
+cd ./microbench-fa
+PATH=/path/to/bootlin-riscv64/bin:$PATH make
+PATH=/path/to/bootlin-riscv64/bin:$PATH \
   riscv64-linux-gcc -O2 -march=rv64gcv -mabi=lp64d -Wall -static \
   -Wno-unused-result -I../microbench-mo2 -DSEQ_LEN=8192 \
   bench_fa_spacemit_bf16.c -o bench_fa_spacemit_bf16_l8k -lm
-PATH=/home/noah/project/riscv/install/bootlin-riscv64/bin:$PATH \
+PATH=/path/to/bootlin-riscv64/bin:$PATH \
   riscv64-linux-gcc -O2 -march=rv64gcv -mabi=lp64d -Wall -static \
   -Wno-unused-result -I../microbench-mo2 -DSEQ_LEN=8192 \
   bench_fa_mixed_streaming_stub.c -o bench_fa_mixed_streaming_stub_l8k -lm
@@ -317,12 +317,12 @@ source ~/miniconda3/etc/profile.d/conda.sh && conda activate gem5-build
 for b in fa_spacemit_bf16 fa_mixed_streaming_stub \
          fa_spacemit_bf16_l8k fa_mixed_streaming_stub_l8k; do
   mkdir -p run/j2_$b && cd run/j2_$b
-  LD_LIBRARY_PATH=$CONDA_PREFIX/lib /home/noah/project/riscv/gem5/build/RISCV/gem5.opt \
-    --outdir=. /home/noah/project/riscv/gem5/configs/deprecated/example/se.py \
+  LD_LIBRARY_PATH=$CONDA_PREFIX/lib $GEM5_DIR/build/RISCV/gem5.opt \
+    --outdir=. $GEM5_DIR/configs/deprecated/example/se.py \
     --cpu-type=TimingSimpleCPU --num-cpus=4 \
     --caches --l1d_size=32KiB --l1i_size=32KiB \
     --l2cache --l2_size=512KiB --mem-size=512MB \
-    -c /home/noah/project/riscv/microbench-fa/bench_$b
+    -c ../../bench_$b
   cd ../..
 done
 
@@ -330,12 +330,12 @@ done
 for b in fa_spacemit_bf16 fa_mixed_streaming_stub fa_bf16_rvv \
          fa_mixed_rvv_stub fa_bf16; do
   mkdir -p run/j2_o3_$b && cd run/j2_o3_$b
-  LD_LIBRARY_PATH=$CONDA_PREFIX/lib /home/noah/project/riscv/gem5/build/RISCV/gem5.opt \
-    --outdir=. /home/noah/project/riscv/gem5/configs/deprecated/example/se.py \
+  LD_LIBRARY_PATH=$CONDA_PREFIX/lib $GEM5_DIR/build/RISCV/gem5.opt \
+    --outdir=. $GEM5_DIR/configs/deprecated/example/se.py \
     --cpu-type=RiscvO3CPU --num-cpus=4 \
     --caches --l1d_size=32KiB --l1i_size=32KiB \
     --l2cache --l2_size=512KiB --mem-size=512MB \
-    -c /home/noah/project/riscv/microbench-fa/bench_$b
+    -c ../../bench_$b
   cd ../..
 done
 ```

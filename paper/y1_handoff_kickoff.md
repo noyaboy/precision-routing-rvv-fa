@@ -30,19 +30,19 @@ plan is locked, replan Y2-Y4 annually.
 
 | Artifact | Path | State |
 |---|---|---|
-| Saturn RTL (5 modules + 57 ChiselTests) | `/home/noah/project/riscv/saturn-fu/` | sbt test passes |
-| gem5 fork (decoder + FU latency + microbenches) | `/home/noah/project/riscv/gem5/` `stable` branch | commit `841d376` |
-| Exo fork (SaturnRVV platform + 4 @instrs) | `/home/noah/project/riscv/exo/` `main` branch | platform file added in this session; smoke test passes |
-| Microbenches (kernel + L-sweep + hd-sweep) | `/home/noah/project/riscv/microbench-fa/` | GCC 14.2 toolchain default |
-| Paper draft | `/home/noah/project/riscv/paper/paper_draft.md` | 9135 words, 9/9 sections drafted, 3 figs, 6 tables |
-| Bug report | `/home/noah/project/riscv/paper/gcc_bug_report.md` | Ready to submit (GCC 13 backport request) |
+| Saturn RTL (5 modules + 57 ChiselTests) | `./saturn-fu/` | sbt test passes |
+| gem5 fork (decoder + FU latency + microbenches) | `$GEM5_DIR/` `stable` branch | commit `841d376` |
+| Exo fork (SaturnRVV platform + 4 @instrs) | `./exo/` `main` branch | platform file added in this session; smoke test passes |
+| Microbenches (kernel + L-sweep + hd-sweep) | `./microbench-fa/` | GCC 14.2 toolchain default |
+| Paper draft | `./paper/paper_draft.md` | 9135 words, 9/9 sections drafted, 3 figs, 6 tables |
+| Bug report | `./paper/gcc_bug_report.md` | Ready to submit (GCC 13 backport request) |
 
 ### Toolchain (load-bearing)
 
 - **GCC 14.2** at `/tmp/bootlin-14/riscv64-lp64d--glibc--bleeding-edge-2024.05-1/bin/`
 - Flags: `-O2 -fno-tree-vectorize` (workaround for GCC 14 -O2 auto-vec bug)
 - Pre-widen-Q workaround in `bench_fa_mixed_rvv_native.c` retained (defensive)
-- GCC 13.2 at `/home/noah/project/riscv/install/bootlin-riscv64/bin/` retained as fallback (older measurements use this)
+- GCC 13.2 at `/path/to/bootlin-riscv64/bin/` retained as fallback (older measurements use this)
 - gem5 conda env: `source ~/miniconda3/etc/profile.d/conda.sh && conda activate gem5-build`
 
 ## Open items (none gate paper submission)
@@ -97,11 +97,11 @@ plan is locked, replan Y2-Y4 annually.
 
 ## Memory + git context
 
-- Project repo at `/home/noah/project/riscv/.git` on `main`, two
+- Project repo at `./.git` on `main`, two
   commits (initial `f99fb3d` + this session's handoff commit).
-- Exo fork at `/home/noah/project/riscv/exo/.git` on `main`, one
+- Exo fork at `./exo/.git` on `main`, one
   commit on top of upstream `2f5472d` (the SaturnRVV platform).
-- gem5 fork at `/home/noah/project/riscv/gem5/.git` on `stable`,
+- gem5 fork at `$GEM5_DIR/.git` on `stable`,
   commit `841d376` (decoder + FU latency wiring; not modified this
   session).
 - saturn-fu lives inside the main project repo (no separate .git);
@@ -113,7 +113,7 @@ plan is locked, replan Y2-Y4 annually.
 - `feedback-direct-recommendations`: give the technical playbook
   with reasoning, not scope-narrowing.
 - `feedback-keep-work-dir-clean`: ephemeral scratch → /tmp, durable
-  artifacts → `/home/noah/project/riscv/paper/`.
+  artifacts → `./paper/`.
 - `feedback-rvv-asm-vsetvli`: disassemble + check vsetvli stream
   before believing operand-width hypotheses (GCC 13.2 pass bug);
   GCC 14.2+ has the fix but introduced a new -O2 auto-vec issue

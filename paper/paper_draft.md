@@ -560,7 +560,7 @@ The four declarations together (`vfconv.nvfp4.bf16.v`,
 `vfconv.bf16.fp8.v`, `vfconv.fp8.bf16.v`, `vfexp.v`) plus the
 `SaturnRVV_M{1,2,4}` classes live in
 `src/exo/platforms/saturn_rvv.py` in our Exo fork at
-`/home/noah/project/riscv/exo/`. Total: 309 LOC including the
+`./exo/`. Total: 309 LOC including the
 inline C header.
 
 ### 5.4 Smoke Test

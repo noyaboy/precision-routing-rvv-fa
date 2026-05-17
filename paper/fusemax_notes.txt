@@ -37,7 +37,7 @@ The Y1 paper write-up can lead with:
 4. "FuseMax evaluates on encoder transformers (BERT/T5); we evaluate **autoregressive decoder LLMs** (Llama-3.2-1B) where KV-cache memory bandwidth is the bottleneck."
 5. "FuseMax pins all stages to FP16; we route **BF16 logits / NVFP4 K/V cache / FP8 softmax / BF16 output**."
 
-## Citations to add to /home/noah/project/riscv/paper/related_work.md
+## Citations to add to ./paper/related_work.md
 
 - **Nayak et al., TeAAL ASPLOS 2024** — declarative sparse-tensor framework, parent of FuseMax's Einsum methodology. Needed for contrasting Exo @instr (we use) vs TeAAL spec-only (they use).
 - **Odemuyiwa et al., LoopTree TACO/PACT 2024** — fused-layer dataflow design space; cited by FuseMax for fusion analysis. Relevant to our fused-FA scheduling work.

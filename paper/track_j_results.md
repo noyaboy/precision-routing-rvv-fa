@@ -164,18 +164,18 @@ default link set.  Fixed with `-lm` per-target; 30-second iteration.
 ## Reproducibility
 
 ```bash
-cd /home/noah/project/riscv/microbench-fa
-PATH=/home/noah/project/riscv/install/bootlin-riscv64/bin:$PATH make
+cd ./microbench-fa
+PATH=/path/to/bootlin-riscv64/bin:$PATH make
 
 source ~/miniconda3/etc/profile.d/conda.sh && conda activate gem5-build
 for b in fa_bf16 fa_mixed; do
   mkdir -p run/$b && cd run/$b
-  LD_LIBRARY_PATH=$CONDA_PREFIX/lib /home/noah/project/riscv/gem5/build/RISCV/gem5.opt \
-    --outdir=. /home/noah/project/riscv/gem5/configs/deprecated/example/se.py \
+  LD_LIBRARY_PATH=$CONDA_PREFIX/lib $GEM5_DIR/build/RISCV/gem5.opt \
+    --outdir=. $GEM5_DIR/configs/deprecated/example/se.py \
       --cpu-type=TimingSimpleCPU --num-cpus=4 \
       --caches --l1d_size=32KiB --l1i_size=32KiB \
       --l2cache --l2_size=512KiB --mem-size=512MB \
-      -c /home/noah/project/riscv/microbench-fa/bench_$b
+      -c ../../bench_$b
   cd ../..
 done
 ```
@@ -487,20 +487,20 @@ needs the long-context + larger-model extension.
 ## Reproducibility
 
 ```bash
-cd /home/noah/project/riscv/microbench-fa
-PATH=/home/noah/project/riscv/install/bootlin-riscv64/bin:$PATH make
+cd ./microbench-fa
+PATH=/path/to/bootlin-riscv64/bin:$PATH make
 
 source ~/miniconda3/etc/profile.d/conda.sh && conda activate gem5-build
 for b in fa_bf16 fa_bf16_rvv fa_mixed fa_mixed_stub fa_mixed_stub2 \
          fa_mixed_rvv fa_mixed_rvv_stub; do
   mkdir -p run/j13_$b && cd run/j13_$b
   LD_LIBRARY_PATH=$CONDA_PREFIX/lib \
-    /home/noah/project/riscv/gem5/build/RISCV/gem5.opt --outdir=. \
-    /home/noah/project/riscv/gem5/configs/deprecated/example/se.py \
+    $GEM5_DIR/build/RISCV/gem5.opt --outdir=. \
+    $GEM5_DIR/configs/deprecated/example/se.py \
     --cpu-type=TimingSimpleCPU --num-cpus=4 \
     --caches --l1d_size=32KiB --l1i_size=32KiB \
     --l2cache --l2_size=512KiB --mem-size=512MB \
-    -c /home/noah/project/riscv/microbench-fa/bench_$b
+    -c ../../bench_$b
   cd ../..
 done
 ```
