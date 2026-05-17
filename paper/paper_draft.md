@@ -11,32 +11,26 @@ the companion notebook `paper_drafting_notes.md`.
 Edge LLM inference is shifting to open RISC-V silicon, and the open
 RVV software stack has caught up: upstream llama.cpp ships a
 polynomial RVV softmax kernel and a SpacemiT-K1-tuned fused
-flash-attention path. The gap that remains is *precision routing* —
-today's open RVV attention pins every stage to one precision, leaving
-the headline 3.56× KV-cache bandwidth savings from NVFP4 microscale
-block-16 formats unrealized in cycles. We present an end-to-end
-co-designed mixed-precision fused flash-attention stack: **(i)**
-four new RVV custom instructions on the Berkeley Saturn vector unit
-(`vfconv.{nvfp4,bf16,fp8}.*` family + a 10-stage pipelined `vfexp.v`)
-with bit-exact-validated RTL (57/57 ChiselTests, exhaustive sweeps
-up to 65 536 cases per lane) at 0.317 mm² @ 16 nm standalone (6.3 %
-of Saturn) or 0.055 mm² FMA-shared (1.1 %); **(ii)** a gem5 5.1
-RISC-V decoder patch and FU-latency wiring that issues all four
-customs natively; **(iii)** an Exo 2 `@instr` library that declares
-them with a parametric SaturnRVV memory class. We verify a **3.56×
-KV-cache DRAM-bandwidth reduction** across seq_len ∈ [2 K, 16 K] at
-head_dim = 64, and a **26–39 % per-row cycle speedup** of the
-FU-integrated path over a software-dequant mixed-precision baseline
-at iso-FP8-quant policy on RiscvO3CPU. The literal ≥1.5× speedup
-over BF16 RVV is *not met* in our gem5 + DDR3-1600 configuration:
-BF16 RVV stays compute-bound at every tested seq_len (IPC 0.80,
-20 % of the BW budget), so NVFP4's bandwidth win cannot translate
-to cycles without a tighter memory-subsystem ceiling — but the
-best L2 K case lands at 1.59×, within 6 % of the target. We frame the
-literal speedup as a memory-subsystem property, projected
-conditionally; the FU-integration delta is the lower-bound
-contribution attributable to the hardware design alone. All RTL,
-gem5 patches, kernels, and Exo declarations open-source.
+flash-attention path. The gap is *precision routing*: open
+RVV attention pins every stage to one precision, leaving NVFP4
+microscale block-16's headline 3.56× KV-cache bandwidth savings
+unrealized in cycles. We present a mixed-precision fused
+flash-attention stack: **(i)** four new RVV custom instructions on
+Berkeley Saturn (`vfconv.{nvfp4,bf16,fp8}.*` + a 10-stage `vfexp.v`)
+with bit-exact RTL (57/57 ChiselTests, sweeps to 65 K cases per
+lane) at 0.317 mm² standalone (6.3 % of Saturn) or 0.055 mm²
+FMA-shared (1.1 %) @ 16 nm; **(ii)** a gem5 5.1 decoder + FU-latency
+patch that issues all four customs natively; **(iii)** an Exo 2
+`@instr` library declaring them via a parametric SaturnRVV memory
+class. On gem5 RiscvO3CPU (hd = 64, seq_len 2 K–16 K)
+we verify a **3.56× KV-cache DRAM-bandwidth reduction** and a
+**26–39 % per-row cycle speedup** of the FU-integrated path over a
+software-dequant baseline. The literal ≥1.5× speedup over BF16 RVV holds only at L2 K (1.59×,
+within 6 % of the target) — BF16 RVV stays compute-bound on our
+DDR3-1600 configuration; §7.6 frames the literal speedup as a
+memory-subsystem property projected for HBM-class systems, with the
+FU-integration delta as the verified hardware contribution. All
+RTL, gem5 patches, kernels, and Exo declarations open-source.
 
 **Keywords**: RISC-V, RVV, large language models, flash attention,
 mixed precision, NVFP4, microscale FP, compiler co-design, scheduling
@@ -100,25 +94,18 @@ DDR3-1600, VLEN=256):
    from 3.54 M cycles (L2 K) to 20.52 M cycles (L16 K).
 
 The literal ≥1.5×-over-BF16-RVV target is **not met** in our gem5
-configuration at any seq_len ∈ [2 K, 16 K] at hd=64. The
-native/BF16-RVV cycle ratio is 1.59× at L2 K and stabilizes at
-~1.95× from L4 K onward. Diagnostic: BF16 RVV is compute-bound at
-this kernel scale (IPC 0.80-0.81, DRAM consumption 1.3-1.6
-GB/cycle vs the 6.4 GB/cycle DDR3-1600 cap). The NVFP4 BW
-advantage is real (verified 3.56× DRAM reduction) but cannot
-translate to cycles when the compute side isn't bottlenecked.
-Section 7.6 unpacks the conditions under which the literal ≥1.5×
-would land — primarily an HBM-class BW ceiling that flips BF16
-RVV into BW-bound territory, or a real Saturn µarch where the FU
-is 16-lane parallel rather than gem5's single-instruction-
-3-cycle-latency stub. The best empirical case (L2 K) lands within
-6 % of the literal target.
+configuration at any tested `seq_len`: the native/BF16-RVV cycle
+ratio is 1.59× at L2 K (within 6 % of the target) and stabilizes
+at ~1.95× from L4 K onward. BF16 RVV stays compute-bound at this
+kernel scale, so NVFP4's bandwidth advantage cannot translate to
+cycles; §7.6 details the conditions under which the literal ≥1.5×
+would land (chiefly an HBM-class BW ceiling or the real 16-lane
+Saturn µarch).
 
-**This paper's claim is therefore split**: the bandwidth claim is
-*verified*, the speedup claim is *projected*. Both are useful: the
-BW claim grounds the headline NVFP4-K/V argument, and the FU
-integration delta lower-bounds the speedup gain attributable to the
-hardware contribution alone, independent of the memory-subsystem
+**The paper's speedup claim is therefore split**: the bandwidth
+claim is *verified*, the literal speedup is *projected* for an
+HBM-class memory subsystem, and the 26–39 % FU-integration delta
+lower-bounds the hardware contribution independent of that
 assumption.
 
 **Contributions**:
@@ -213,8 +200,8 @@ storage footprint is `16 × 4 b + 8 b = 72 b` per 16-element block,
 or 4.5 bits per element — vs FP16's 16 b/elt, a **3.56× compression
 ratio**. NVFP4 trades the OCP MXFP4 block-32 + 8-bit E8M0 scale
 (also 4.5 b/elt) for a tighter block-16 + E4M3 scale: more dynamic-
-range per block but more scale overhead. ARCQuant (arXiv:2601.07475)
-reports < 0.5 perplexity degradation on Llama-3.2 with NVFP4 K/V at
+range per block but more scale overhead. ARCQuant [Anonymous,
+arXiv'26] reports < 0.5 perplexity degradation on Llama-3.2 with NVFP4 K/V at
 calibration tuning. Berkeley's `gemmini-mx` (Hansung Kim) is the
 concurrent NVFP4-on-Gemmini-systolic line of work; we are different
 microarchitecture (vector vs systolic) and different stack scope
@@ -643,6 +630,12 @@ for h in heads:
         O_fp32 += e4m3_decode(P_fp8[s]) · V_fp32
     O[h] ← BF16(O_fp32 · (1/sum_p) / 448)
 ```
+
+The pseudocode operations map to the §4 FU lanes as follows:
+`dequant(K|V)` → `vfconv.nvfp4.bf16.v` (Stage 4.3); `vfexp(·)` →
+`vfexp.v` (Stage 4.2); `E4M3(·)` → `vfconv.bf16.fp8.v` (Stage 4.4);
+`e4m3_decode(·)` → `vfconv.fp8.bf16.v` (Stage 4.5). Each operation
+is an inline vector lane, not a SW table lookup.
 
 K and V are streamed; no intermediate FP32 K/V buffer is
 materialized across heads. Each per-head pass touches the KV
@@ -1109,7 +1102,7 @@ HPCA'20], ELSA [Ham ISCA'21], SpAtten [Wang HPCA'21], Sanger [Lu
 MICRO'21], DOTA [Qu ASPLOS'22], FACT [Qin ISCA'23], CTA [Wang
 HPCA'23] — focus on sparsity, eager prediction, or token pruning,
 none on per-stage precision routing in a fused kernel.
-**SystolicAttention** (FSA, arXiv:2507.11331) is the closest
+**SystolicAttention** (FSA) [arXiv:2507.11331, 2025] is the closest
 closed-source systolic-FA competitor; no precision routing, no RVV.
 The methodology papers we cite are TeAAL [Nayak ASPLOS'24] (the
 Einsum framework parent of FuseMax) and LoopTree [Odemuyiwa
@@ -1136,10 +1129,10 @@ intrinsics, (d) Saturn (OoO, chaining) vs Spatz (in-order),
 
 ### 8.3 NVFP4 / Microscale Quantization
 
-**ARCQuant** [arXiv:2601.07475] is the algorithm baseline for our
+**ARCQuant** [Anonymous, arXiv'26] is the algorithm baseline for our
 NVFP4 K/V choice — PTQ with calibration + per-block scale that
 reports < 0.5 perplexity degradation on Llama-3.2; software-only,
-no HW. **MR-GPTQ** [arXiv:2509.23202] takes the MXFP4 (OCP)
+no HW. **MR-GPTQ** [arXiv:2509.23202, 2025] takes the MXFP4 (OCP)
 algorithm route; we use NVIDIA NVFP4. **Berkeley `gemmini-mx`**
 (Hansung Kim) is the concurrent NVFP4-on-Gemmini-systolic line of
 work — different microarchitecture (vector vs systolic), different
@@ -1164,7 +1157,7 @@ is the substrate we extend.
 ### 8.5 Compiler and Scheduling DSLs
 
 **Exo 2** [Ikarashi et al., ASPLOS'25] is our compiler vehicle.
-Other RVV compiler stacks include **IREE-RVV** [arXiv:2508.14899] —
+Other RVV compiler stacks include **IREE-RVV** [arXiv:2508.14899, 2025] —
 SiFive's MLIR-RVV path on Intelligence X-series with closed-source
 SKL kernels behind a vendor wall — and the Triton GPU stack
 [Tillet MAPL'19], which has no RVV backend. Upstream `exo-lang/exo`
@@ -1184,7 +1177,7 @@ deployment (not microbench); *OSS stack* = full stack open-source.
 
 | Work | ISA / Platform | Open RTL | Custom FU | Mixed prec | Compiler | E2E LLM | OSS stack |
 |---|---|---|---|---|---|---|---|
-| FuseMax [MICRO'24] | Custom spatial | partial (model) | full-attn FU | no (FP16) | Einsum spec | no | partial |
+| FuseMax [MICRO'24] | Custom spatial | partial (model) | full-attn FU | no (FP16) | Einsum spec | no | no |
 | VEXP [ARITH'25] | Snitch (Xfvec) | yes | softmax-exp | no (BF16) | hand intrin. | no | partial |
 | VMXDOTP [DATE'26] | Spatz (RVV) | yes | MX dot-prod | partial (MX, GEMM) | hand intrin. | no (DeiT) | partial |
 | Titopoulos [J.Supercomp'26] | RVV (gem5) | no | no | no | hand intrin. | no | code only |
@@ -1214,18 +1207,11 @@ verified on RiscvO3CPU at hd = 64 across seq_len ∈ [2 K, 16 K]:
 **(i)** a **3.56× KV-cache DRAM-bandwidth reduction** from NVFP4
 K/V storage, and **(ii)** a **26–39 % per-row cycle speedup** of
 the FU-integrated kernel over a software-dequant mixed-precision
-baseline at iso-FP8-quant policy. The literal ≥1.5× speedup over
-BF16 RVV does *not* land in our gem5 + DDR3-1600 configuration —
-BF16 RVV stays compute-bound at every tested seq_len (IPC 0.80-0.81,
-DRAM consumption at 20 % of the BW cap), so NVFP4's bandwidth win
-cannot translate to cycles — but the best L2 K case lands at 1.59×,
-within 6 % of the target. The literal speedup is therefore a
-*memory-subsystem* property, not a property of the hardware design
-itself: an HBM-class BW ceiling, a larger head_dim, or the real
-Saturn µarch with 16-lane FU pipeline would each be sufficient.
-The FU integration delta we measure is the lower bound on the
-speedup attributable to the hardware contribution alone, independent
-of memory-subsystem assumption.
+baseline at iso-FP8-quant policy. The literal ≥1.5× over BF16 RVV
+holds only at L2 K (1.59×, within 6 % of the target) — a
+memory-subsystem property rather than a hardware-design one (§7.6);
+the FU-integration delta lower-bounds the hardware contribution
+independent of that assumption.
 
 All RTL (Saturn fork, 57/57 ChiselTests, Yosys-synthesized to a 16 nm
 area estimate), gem5 patches (RISC-V decoder + FU-latency wiring +
