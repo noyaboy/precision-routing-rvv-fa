@@ -69,6 +69,7 @@ from exo.platforms.saturn_rvv import (
     saturn_vfmacc_vv_f32m2,          # Mo 8 step 2b: FP32 vector vfmacc
     saturn_vfmacc_vf_f32m2,          # Mo 8 step 4a: FP32 vector += scalar-broadcast * vector
     saturn_vfmv_zero_f32m2,          # Mo 8 step 4b: broadcast 0.0 (accumulator init)
+    saturn_vfmul_vf_f32m2,           # Mo 8 step 4b-2: vector × scalar broadcast
     saturn_vfsub_vf_f32m2,           # Mo 8 step 2c: vec - DRAM-scalar broadcast
     saturn_f32_narrow_bf16_m2,       # Mo 8 step 2c: FP32 -> BF16 truncating narrow
     saturn_vfredmax_to_dram_f32m2,   # Mo 8 step 2c: max-reduce to DRAM scalar
@@ -785,6 +786,134 @@ def schedule_pv_macc_row(p=pv_macc_row_naive, verbose=False):
     return p
 
 
+# --- 2i. Mo 8 step 4b-2: softmax_full + dequant_row ----------------------
+#
+#  Two new @procs land the SEQ_LEN-tiled softmax and head_dim-tiled
+#  NVFP4 dequant building blocks for the fa_kernel composition in
+#  step 4b-3.
+#
+#  softmax_full_naive: SEQ_LEN-parameterized two-pass softmax.
+#    Pass 1 = vfredmax over all SEQ_LEN chunks → m_out[0] scalar.
+#    Pass 2 = vfsub.vf(S - m_out[0]) + FP32→BF16 narrow + vfexp +
+#             vse32(P) + vfredusum → l_out[0] scalar.
+#    Matches bench_fa_mixed_rvv_native.c lines 207-249.
+#
+#    Note re vfexp surface: the existing vfexp_v @instr surface
+#    consumes BF16 (ui16 carrier at SEW=16/m1) and produces FP32 (m2).
+#    The bench's inline-asm shortcut runs vfexp.v at SEW=32/m2 with
+#    FP32 input — a discrepancy that step 4d should reconcile (either
+#    add a vfexp_f32_v variant or change the existing macro). For
+#    now, softmax_full_naive uses the BF16-input convention plus an
+#    explicit FP32→BF16 narrow step, matching step 2c's chain.
+#
+#  dequant_row_naive: head_dim=64 NVFP4 → FP32 dequant with E4M3
+#    per-block scale. 4 NVFP4 blocks of 16 elements each. Each block:
+#    vle16 + vfconv.nvfp4.bf16.v + bf16_widen_f32 + vfmul.vf (scale)
+#    + vse32. Matches bench_fa_mixed_rvv_native.c lines 58-108
+#    (dequant_64elt_chunk) at one-block granularity.
+#
+
+@proc
+def softmax_full_naive(
+    seq_len: size,
+    S_fp32:  f32[seq_len] @ DRAM,
+    P_fp32:  f32[seq_len] @ DRAM,
+    m_out:   f32[1]       @ DRAM,
+    l_out:   f32[1]       @ DRAM,
+):
+    assert seq_len > 0
+    assert seq_len % 16 == 0
+
+    # Pass 1: max-reduce
+    for so in seq(0, seq_len / 16):
+        S_reg1: f32[16]
+        for i in seq(0, 16):                            # vle32 S chunk
+            S_reg1[i] = S_fp32[16 * so + i]
+        for i in seq(0, 16):                            # vfredmax
+            m_out[0] = fmaxf(m_out[0], S_reg1[i])
+
+    # Pass 2: sub + narrow + exp + store + sum
+    for so in seq(0, seq_len / 16):
+        S_reg2:    f32[16]
+        S_shifted: f32[16]
+        S_bf16:    ui16[16]
+        P_reg:     f32[16]
+        for i in seq(0, 16):                            # vle32 S chunk
+            S_reg2[i] = S_fp32[16 * so + i]
+        for i in seq(0, 16):                            # vfsub.vf
+            S_shifted[i] = S_reg2[i] - m_out[0]
+        for i in seq(0, 16):                            # F32_NARROW_BF16
+            S_bf16[i] = S_shifted[i]
+        for i in seq(0, 16):                            # vfexp
+            P_reg[i] = S_bf16[i]
+        for i in seq(0, 16):                            # vse32 P
+            P_fp32[16 * so + i] = P_reg[i]
+        for i in seq(0, 16):                            # vfredusum
+            l_out[0] += P_reg[i]
+
+
+def schedule_softmax_full(p=softmax_full_naive, verbose=False):
+    p = set_memory(p, "S_reg1",    SaturnRVV_M2)
+    p = set_memory(p, "S_reg2",    SaturnRVV_M2)
+    p = set_memory(p, "S_shifted", SaturnRVV_M2)
+    p = set_memory(p, "S_bf16",    SaturnRVV_M1)
+    p = set_memory(p, "P_reg",     SaturnRVV_M2)
+
+    # Pass 1: 2 inner loops per `so` iteration (vle32 + vfredmax).
+    p = replace(p, "for i in _: _ #0", saturn_vle32_m2)
+    p = replace(p, "for i in _: _ #0", saturn_vfredmax_to_dram_f32m2)
+    # Pass 2: 6 inner loops per `so` iteration.
+    p = replace(p, "for i in _: _ #0", saturn_vle32_m2)              # S load
+    p = replace(p, "for i in _: _ #0", saturn_vfsub_vf_f32m2)        # S - m
+    p = replace(p, "for i in _: _ #0", saturn_f32_narrow_bf16_m2)    # FP32 -> BF16
+    p = replace(p, "for i in _: _ #0", vfexp_v)                      # vfexp
+    p = replace(p, "for i in _: _ #0", saturn_vse32_m2)              # P store
+    p = replace(p, "for i in _: _ #0", saturn_vfredusum_to_dram_f32m2)
+    if verbose:
+        print(">>> softmax_full after replace chain:"); print(p)
+    return p
+
+
+@proc
+def dequant_row_naive(
+    K_nvfp4: ui16[4, 16] @ DRAM,    # 4 blocks × 16 ui16 carriers
+    K_scale: f32[4]      @ DRAM,    # E4M3 scale per block, decoded to FP32
+    K_fp32:  f32[64]     @ DRAM,    # output FP32 row (head_dim=64)
+):
+    for blk in seq(0, 4):
+        K_nvfp4_reg: ui16[16]
+        K_bf16_reg:  ui16[16]
+        K_fp32_reg:  f32[16]
+        K_scaled:    f32[16]
+        for i in seq(0, 16):                            # vle16 K_nvfp4 block
+            K_nvfp4_reg[i] = K_nvfp4[blk, i]
+        for i in seq(0, 16):                            # vfconv.nvfp4.bf16.v
+            K_bf16_reg[i] = K_nvfp4_reg[i]
+        for i in seq(0, 16):                            # bf16_widen_f32
+            K_fp32_reg[i] = K_bf16_reg[i]
+        for i in seq(0, 16):                            # vfmul.vf (block scale)
+            K_scaled[i] = K_fp32_reg[i] * K_scale[blk]
+        for i in seq(0, 16):                            # vse32 K_fp32 block
+            K_fp32[16 * blk + i] = K_scaled[i]
+
+
+def schedule_dequant_row(p=dequant_row_naive, verbose=False):
+    p = set_memory(p, "K_nvfp4_reg", SaturnRVV_M1)
+    p = set_memory(p, "K_bf16_reg",  SaturnRVV_M1)
+    p = set_memory(p, "K_fp32_reg",  SaturnRVV_M2)
+    p = set_memory(p, "K_scaled",    SaturnRVV_M2)
+
+    # 5 inner loops per blk iteration.
+    p = replace(p, "for i in _: _ #0", saturn_vle16_m1)              # nvfp4 load
+    p = replace(p, "for i in _: _ #0", vfconv_nvfp4_bf16_v)          # vfconv
+    p = replace(p, "for i in _: _ #0", saturn_bf16_widen_f32_m2)     # widen
+    p = replace(p, "for i in _: _ #0", saturn_vfmul_vf_f32m2)        # vfmul.vf (scale)
+    p = replace(p, "for i in _: _ #0", saturn_vse32_m2)              # fp32 store
+    if verbose:
+        print(">>> dequant_row after replace chain:"); print(p)
+    return p
+
+
 # --- 3. Lower, emit C, verify ----------------------------------------------
 
 def _print_body_excerpt(c_data, name_prefix):
@@ -816,6 +945,8 @@ if __name__ == "__main__":
     print(pv_macc_chunk_naive)
     print(qkt_dot_naive)
     print(pv_macc_row_naive)
+    print(softmax_full_naive)
+    print(dequant_row_naive)
 
     print("=== 2. Schedule lowering ===")
     dequant_chunk_scheduled = schedule_dequant_chunk()
@@ -851,6 +982,12 @@ if __name__ == "__main__":
     pv_macc_row_scheduled = schedule_pv_macc_row()
     print("--- pv_macc_row after scheduling (Mo 8 step 4b-1: per-key P·V row) ---")
     print(pv_macc_row_scheduled)
+    softmax_full_scheduled = schedule_softmax_full()
+    print("--- softmax_full after scheduling (Mo 8 step 4b-2: SEQ_LEN softmax) ---")
+    print(softmax_full_scheduled)
+    dequant_row_scheduled = schedule_dequant_row()
+    print("--- dequant_row after scheduling (Mo 8 step 4b-2: NVFP4 row) ---")
+    print(dequant_row_scheduled)
 
     print("=== 3. Emit C ===")
     c_data, h_data = compile_procs_to_strings(
@@ -866,6 +1003,8 @@ if __name__ == "__main__":
             pv_macc_chunk_scheduled,
             qkt_dot_scheduled,
             pv_macc_row_scheduled,
+            softmax_full_scheduled,
+            dequant_row_scheduled,
         ],
         "exo_schedule_fa.h",
     )
@@ -909,6 +1048,11 @@ if __name__ == "__main__":
         # pv_macc_row (Mo 8 step 4b-1: per-key head_dim=64 P·V row)
         # (vfmacc.vf marker already covered; this @proc adds the
         #  outer ko loop over head_dim chunks)
+        # softmax_full (Mo 8 step 4b-2: SEQ_LEN-parameterized two-pass softmax)
+        "so < ((seq_len) / (16))",        # outer chunk loop bound (Exo paren convention)
+        # dequant_row (Mo 8 step 4b-2: NVFP4 -> FP32 with E4M3 scale)
+        "__riscv_vfmul_vf_f32m2",         # saturn_vfmul_vf_f32m2 intrinsic
+        "blk = 0; blk < 4",               # 4 NVFP4 blocks per head_dim row
     ]
     missing = [m for m in expected_markers if m not in c_data]
     if missing:
@@ -933,11 +1077,13 @@ if __name__ == "__main__":
     _print_body_excerpt(c_data, "pv_macc_chunk")
     _print_body_excerpt(c_data, "qkt_dot")
     _print_body_excerpt(c_data, "pv_macc_row")
+    _print_body_excerpt(c_data, "softmax_full")
+    _print_body_excerpt(c_data, "dequant_row")
 
     print(f"=== Summary ===")
     print(f"  C file: {len(c_data)} bytes, {c_data.count(chr(10))} lines")
     print(f"  H file: {len(h_data)} bytes, {h_data.count(chr(10))} lines")
-    print(f"  11 / 11 schedules unified; Mo 8 steps 1 + 2a + 2b + 2c + 3 + 4a + 4b-1:")
+    print(f"  13 / 13 schedules unified; Mo 8 steps 1 + 2a + 2b + 2c + 3 + 4a + 4b-1 + 4b-2:")
     print(f"  - step 1:   head_dim=64 via divide_loop + per-tile stage_mem")
     print(f"  - step 2a:  §6 outer-loop shape (8 heads × seq_len × head_dim tile)")
     print(f"  - step 2b:  QK^T per-lane vfmacc.vv accumulator chunk")
@@ -947,8 +1093,9 @@ if __name__ == "__main__":
     print(f"  - step 4b-1: qkt_dot per-key dot product + pv_macc_row per-key P·V row")
     print(f"               (matches bench_fa_mixed_rvv_native.c lines 193-205 and")
     print(f"               272-278 respectively).")
-    print(f"  Remaining: 4b-2 softmax_full + dequant_row (NVFP4 + scale).")
-    print(f"  Remaining: 4b-3 compose into fa_kernel_decode_naive.")
+    print(f"  - step 4b-2: softmax_full (two-pass over SEQ_LEN) + dequant_row")
+    print(f"               (NVFP4->FP32 per head_dim row with E4M3 per-block scale).")
+    print(f"  Remaining: 4b-3 compose all into fa_kernel_decode_naive.")
     print(f"  Remaining: 4c C harness + gem5 first cycle measurement.")
     print(f"  Remaining: 4d optimize if cycle delta > 10% (rewrite widen/narrow/")
     print(f"             reductions as intrinsic-based @instrs per the step-4a")
