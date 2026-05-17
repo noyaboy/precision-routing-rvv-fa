@@ -11,12 +11,16 @@ install/
 models/
 
 # Build outputs + sim runs (regeneratable)
-build/
+# /build/ is anchored to the top-level llama.cpp/chipyard build dir; subdir
+# build/ rules (e.g. saturn-fu/build/) are handled separately below.
+/build/
 m5out/
 scratch/
 
-# saturn-fu build artifacts (keep sources)
-saturn-fu/build/
+# saturn-fu build artifacts (keep reproduce scripts in build/, ignore outputs)
+saturn-fu/build/*
+!saturn-fu/build/*.sh
+!saturn-fu/build/*.py
 saturn-fu/target/
 saturn-fu/test_run_dir/
 saturn-fu/project/target/
