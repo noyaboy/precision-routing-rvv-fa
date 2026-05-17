@@ -61,6 +61,8 @@ from exo.platforms.saturn_rvv import (
     saturn_vse32_m2,
     vfconv_nvfp4_bf16_v,
     vfexp_v,
+    saturn_bf16_widen_f32_m2,    # Mo 8 step 2b: BF16->FP32 widen (vzext+vsll)
+    saturn_vfmacc_vv_f32m2,      # Mo 8 step 2b: FP32 vector vfmacc
 )
 
 
@@ -319,6 +321,97 @@ def schedule_softmax_exp_chunk(p=softmax_exp_chunk_naive, verbose=False):
     return p
 
 
+# --- 2d. Mo 8 step 2b: QK^T inner-product chunk with dequant chain --------
+#
+#  First demo that adds real compute to the methodology — not just opaque
+#  copy + precision conversion. One 16-lane head_dim chunk of the §6
+#  QK^T tile loop body:
+#
+#      S_acc[i] += Q[i] * dequant_to_fp32(K_nvfp4[i])     for i in 0..16
+#
+#  The dequant_to_fp32(...) is a two-step chain: vfconv.nvfp4.bf16.v to
+#  BF16 (ui16 carrier) at LMUL=1, then SATURN_BF16_WIDEN_F32 (vzext.vf2
+#  + vsll.vi 16) to FP32 at LMUL=2. The widen path matches
+#  bench_fa_mixed_rvv_native.c since gem5 lacks Zvfbfwma /
+#  vfwcvtbf16.f.f.v.
+#
+#  Q is assumed pre-widened to FP32 outside this chunk (matches the §6
+#  hand-coded approach where Q is widened once at init and reused
+#  across the entire seq_len QK^T pass). S_acc is read-modify-write so
+#  multiple head_dim chunks can accumulate into the same vector
+#  (in step-2-follow-ons that compose this chunk over head_dim tiles).
+#
+#  The body intentionally produces 16 per-lane partial sums rather than
+#  a single inner-product scalar. Folding 16 lanes into one S[i, j]
+#  cell of the score matrix needs a vfredsum reduction; that lands in
+#  step 2c (online softmax), which uses the same reduction primitive
+#  for the softmax max and sum scans.
+#
+#  Five buffers staged onto SaturnRVV register groups:
+#    - Q_reg       (f32, M2)  loaded via vle32_m2
+#    - K_nvfp4_reg (ui16, M1) loaded via vle16_m1
+#    - K_bf16_reg  (ui16, M1) vfconv.nvfp4.bf16.v dst
+#    - K_fp32_reg  (f32, M2)  saturn_bf16_widen_f32_m2 dst
+#    - S_reg       (f32, M2)  loaded via vle32_m2, vfmacc r-m-w, stored via vse32_m2
+#
+
+@proc
+def qkt_chunk_naive(
+    Q_fp32:  f32[16]  @ DRAM,
+    K_nvfp4: ui16[16] @ DRAM,
+    S_acc:   f32[16]  @ DRAM,
+):
+    Q_reg:       f32[16]
+    K_nvfp4_reg: ui16[16]
+    K_bf16_reg:  ui16[16]
+    K_fp32_reg:  f32[16]
+    S_reg:       f32[16]
+    for i in seq(0, 16):                  # vle32_m2 (Q load)
+        Q_reg[i] = Q_fp32[i]
+    for i in seq(0, 16):                  # vle16_m1 (K load)
+        K_nvfp4_reg[i] = K_nvfp4[i]
+    for i in seq(0, 16):                  # vfconv.nvfp4.bf16.v
+        K_bf16_reg[i] = K_nvfp4_reg[i]
+    for i in seq(0, 16):                  # SATURN_BF16_WIDEN_F32
+        K_fp32_reg[i] = K_bf16_reg[i]
+    for i in seq(0, 16):                  # vle32_m2 (S_acc load)
+        S_reg[i] = S_acc[i]
+    for i in seq(0, 16):                  # vfmacc.vv on f32m2
+        S_reg[i] += Q_reg[i] * K_fp32_reg[i]
+    for i in seq(0, 16):                  # vse32_m2 (S_acc store)
+        S_acc[i] = S_reg[i]
+
+
+def schedule_qkt_chunk(p=qkt_chunk_naive, verbose=False):
+    """
+    Same structure as schedule_softmax_exp_chunk — the @proc already
+    carries the explicit (load, ..., compute, ..., store) sequence so
+    the schedule just sets the staged buffers' memory class and applies
+    replace() in source order. No stage_mem needed (vfmacc's body is
+    `dst[i] += lhs[i] * rhs[i]`, real arithmetic, but Exo's unification
+    matches it just like the opaque copies).
+    """
+    p = set_memory(p, "Q_reg",       SaturnRVV_M2)
+    p = set_memory(p, "K_nvfp4_reg", SaturnRVV_M1)
+    p = set_memory(p, "K_bf16_reg",  SaturnRVV_M1)
+    p = set_memory(p, "K_fp32_reg",  SaturnRVV_M2)
+    p = set_memory(p, "S_reg",       SaturnRVV_M2)
+
+    # All 7 loops use iter `i`; each replace() removes its loop, so
+    # `#0` advances to the next sibling. Source order matches the
+    # @instr substitution order below.
+    p = replace(p, "for i in _: _ #0", saturn_vle32_m2)             # Q load
+    p = replace(p, "for i in _: _ #0", saturn_vle16_m1)             # K load
+    p = replace(p, "for i in _: _ #0", vfconv_nvfp4_bf16_v)         # vfconv
+    p = replace(p, "for i in _: _ #0", saturn_bf16_widen_f32_m2)    # widen
+    p = replace(p, "for i in _: _ #0", saturn_vle32_m2)             # S_acc load
+    p = replace(p, "for i in _: _ #0", saturn_vfmacc_vv_f32m2)      # vfmacc
+    p = replace(p, "for i in _: _ #0", saturn_vse32_m2)             # S_acc store
+    if verbose:
+        print(">>> after replace chain:"); print(p)
+    return p
+
+
 # --- 3. Lower, emit C, verify ----------------------------------------------
 
 def _print_body_excerpt(c_data, name_prefix):
@@ -343,6 +436,7 @@ if __name__ == "__main__":
     print(softmax_exp_chunk_naive)
     print(dequant_64_naive)
     print(fa_dequant_per_row_naive)
+    print(qkt_chunk_naive)
 
     print("=== 2. Schedule lowering ===")
     dequant_chunk_scheduled = schedule_dequant_chunk()
@@ -357,6 +451,9 @@ if __name__ == "__main__":
     fa_dequant_per_row_scheduled = schedule_fa_dequant_per_row()
     print("--- fa_dequant_per_row after scheduling (§6 outer-loop shape) ---")
     print(fa_dequant_per_row_scheduled)
+    qkt_chunk_scheduled = schedule_qkt_chunk()
+    print("--- qkt_chunk after scheduling (Mo 8 step 2b: QK^T inner-product) ---")
+    print(qkt_chunk_scheduled)
 
     print("=== 3. Emit C ===")
     c_data, h_data = compile_procs_to_strings(
@@ -365,6 +462,7 @@ if __name__ == "__main__":
             softmax_exp_chunk_scheduled,
             dequant_64_scheduled,
             fa_dequant_per_row_scheduled,
+            qkt_chunk_scheduled,
         ],
         "exo_schedule_fa.h",
     )
@@ -384,6 +482,10 @@ if __name__ == "__main__":
         # fa_dequant_per_row (Mo 8 step 2a: §6 outer-loop shape)
         "h = 0; h < 8",                   # heads outer loop
         "s = 0; s < seq_len",             # seq_len middle loop (`size` param)
+        # qkt_chunk (Mo 8 step 2b: QK^T inner-product with dequant chain)
+        "SATURN_BF16_WIDEN_F32",          # saturn_bf16_widen_f32_m2 macro
+        "__riscv_vfmacc_vv_f32m2",        # saturn_vfmacc_vv_f32m2 intrinsic
+        "__riscv_vle32_v_f32m2",          # saturn_vle32_m2 (Q + S_acc loads)
     ]
     missing = [m for m in expected_markers if m not in c_data]
     if missing:
@@ -401,15 +503,18 @@ if __name__ == "__main__":
     _print_body_excerpt(c_data, "softmax_exp_chunk")
     _print_body_excerpt(c_data, "dequant_64")
     _print_body_excerpt(c_data, "fa_dequant_per_row")
+    _print_body_excerpt(c_data, "qkt_chunk")
 
     print(f"=== Summary ===")
     print(f"  C file: {len(c_data)} bytes, {c_data.count(chr(10))} lines")
     print(f"  H file: {len(h_data)} bytes, {h_data.count(chr(10))} lines")
-    print(f"  4 / 4 schedules unified; 2 / 4 Saturn customs exercised")
-    print(f"  (vfconv.nvfp4.bf16.v + vfexp.v).  Mo 8 steps 1 + 2a done:")
-    print(f"  - step 1: head_dim=64 via divide_loop + per-tile stage_mem")
+    print(f"  5 / 5 schedules unified; 2 / 4 Saturn customs exercised")
+    print(f"  (vfconv.nvfp4.bf16.v + vfexp.v).  Mo 8 steps 1 + 2a + 2b done:")
+    print(f"  - step 1:  head_dim=64 via divide_loop + per-tile stage_mem")
     print(f"  - step 2a: §6 outer-loop shape (8 heads × seq_len × head_dim tile)")
-    print(f"  Follow-ons: step 2b QK^T matmul kernel (needs +3 fp32 @instrs);")
-    print(f"  step 2c online softmax (needs +2 reduction @instrs); step 3")
-    print(f"  wires remaining 2 vfconv lanes (bf16.fp8.v + fp8.bf16.v).")
+    print(f"  - step 2b: QK^T inner-product chunk with NVFP4 -> BF16 -> FP32")
+    print(f"             chain feeding fp32 vfmacc.vv (first compute lane in")
+    print(f"             the methodology, not just opaque copy + conversion)")
+    print(f"  Follow-ons: step 2c online softmax (needs +2 reduction @instrs);")
+    print(f"  step 3 wires remaining 2 vfconv lanes (bf16.fp8.v + fp8.bf16.v).")
     sys.exit(0)
