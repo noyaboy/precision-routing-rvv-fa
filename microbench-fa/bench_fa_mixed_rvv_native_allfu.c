@@ -1,20 +1,24 @@
 /*
- * Track J-4.5b — Flash-attention decode-step, mixed precision, RVV-vectorized,
- * with native Saturn custom FUs (vfexp.v + vfconv.nvfp4.bf16.v).
+ * Track J-4.5d — Variant of bench_fa_mixed_rvv_native.c that ALSO issues
+ * the FP8-quant via the native `vfconv.bf16.fp8.v` lane (VS1=0x08,
+ * op-class SimdBf16Fp8Cvt, opLat=2).  This is the "all 4 Saturn customs
+ * integrated end-to-end" experiment.
  *
- * Built on bench_fa_mixed_rvv_stub.c.  Differences:
- *   1. `dequant_row_native()` replaces `dequant_row_stub()`.  Scalar unpacks
- *      8 packed bytes into 16 u16-nibbles per NVFP4 block, then issues the
- *      native `vfconv.nvfp4.bf16.v` (VFUNCT6=0x13/VS1=0x09, op-class
- *      SimdNvfp4Cvt with opLat=3 wired in FuncUnitConfig.py).  Per-block
- *      E4M3 scale applied via vector vfmul on the widened FP32 values.
- *   2. The softmax exp loop swaps scalar `fu_expf()` for native vector
- *      `vfexp.v` (VFUNCT6=0x13/VS1=0x06, op-class SimdFloatExp, opLat=10).
- *      Vectorized over SEQ_LEN at LMUL=2.
+ * Pipeline per 16-element batch in the FP8 quant loop:
+ *   vle32 P_fp32 -> vfmul.vf by 448 -> vnsrl FP32->BF16 (low 16 bits
+ *   dropped, truncation; BF16 narrowing error << downstream FP8-E4M3
+ *   quant resolution) -> vfconv.bf16.fp8.v -> vnsrl u16 -> u8
+ *   (extract low byte) -> vse8 P_fp8.
  *
- * Bench shape and all other kernel structure preserved from
- * bench_fa_mixed_rvv_stub.c.  Direct cycle comparison: J3+stub (scalar
- * dequant + polynomial expf) vs J4 native (vfconv + vfexp).
+ * Finding (RiscvO3CPU @ SEQ_LEN=2048): correctness preserved (checksum
+ * -20.375 vs reference -20.27 -> 0.4 % drift, well inside the 5 % NVFP4
+ * quantization-noise budget), but cycles INCREASE from native (SW FP8
+ * quant) 7.00 M -> 7.56 M.  IPC drops 2.19 -> 1.91 while instruction
+ * count drops 15.36 M -> 14.41 M.  The 5-deep vector dependency chain
+ * at LMUL=1 / mf2 limits ILP; gem5's single-instruction-2-cycle stub
+ * for the vfconv.bf16.fp8.v lane doesn't model the 16-lane parallelism
+ * a real Saturn FU would provide.  Kept as a sidebar variant; the
+ * primary bench (bench_fa_mixed_rvv_native.c) uses SW FP8 quant.
  */
 
 #include <stdio.h>
@@ -50,26 +54,30 @@ static inline vfloat32m4_t bf16_load_widen_m4(const bf16_t *p, size_t vl) {
     return __riscv_vreinterpret_v_u32m4_f32m4(shf);
 }
 
-/* Native vfconv.nvfp4.bf16.v dequant.  Processes 64 elements (4 NVFP4
- * blocks) per asm chunk: one e16-m4 vfconv over 64 nibbles + four e32-m2
- * widen+scale+store sequences.  Two vsetvli switches per chunk.  For
- * HEAD_DIM > 64 the function loops the chunk over HEAD_DIM/64 halves
- * (supports HEAD_DIM ∈ {64, 128, 192, 256, ...} cleanly). */
-static inline void dequant_64elt_chunk(const uint8_t *pk_chunk,  /* 32 bytes */
-                                       const uint8_t *sc_chunk,  /* 4 bytes  */
-                                       float *fp32_out_chunk) {
-    uint16_t nibbles[64] __attribute__((aligned(64)));
-    for (int blk = 0; blk < 4; blk++) {
+/* Native vfconv.nvfp4.bf16.v dequant: all 4 blocks of 16 nibbles in one
+ * asm block.  Bug-2 fix: collapse 8 vsetvli switches/row (2 per block) to
+ * 2 vsetvli switches/row (one e16-m4 pass for the vfconv, one e32-m2
+ * config that persists across the 4 widen+scale+store blocks).  Saves
+ * ~6 vsetvli + 4 SEW-transition penalties per row x 16 K rows. */
+static inline void dequant_row_native(const uint8_t *pk_row,
+                                      const uint8_t *sc_row,
+                                      float fp32_out[HEAD_DIM]) {
+    uint16_t nibbles[HEAD_DIM] __attribute__((aligned(64)));
+
+    const int blocks_per_row = HEAD_DIM / NVFP4_BLOCK;
+    for (int blk = 0; blk < blocks_per_row; blk++) {
         for (int b = 0; b < NVFP4_BLOCK / 2; b++) {
-            uint8_t byte = pk_chunk[blk * (NVFP4_BLOCK / 2) + b];
+            uint8_t byte = pk_row[blk * (NVFP4_BLOCK / 2) + b];
             nibbles[blk * NVFP4_BLOCK + 2 * b + 0] = (uint16_t)(byte & 0xF);
             nibbles[blk * NVFP4_BLOCK + 2 * b + 1] = (uint16_t)((byte >> 4) & 0xF);
         }
     }
-    float s0 = e4m3_decode[sc_chunk[0]];
-    float s1 = e4m3_decode[sc_chunk[1]];
-    float s2 = e4m3_decode[sc_chunk[2]];
-    float s3 = e4m3_decode[sc_chunk[3]];
+
+    float s0 = e4m3_decode[sc_row[0]];
+    float s1 = e4m3_decode[sc_row[1]];
+    float s2 = e4m3_decode[sc_row[2]];
+    float s3 = e4m3_decode[sc_row[3]];
+
     asm volatile (
         "li        t0, 64\n\t"
         "vsetvli   x0, t0, e16, m4, ta, ma\n\t"
@@ -100,24 +108,11 @@ static inline void dequant_64elt_chunk(const uint8_t *pk_chunk,  /* 32 bytes */
         :
         : [in]"r"(nibbles),
           [s0]"f"(s0), [s1]"f"(s1), [s2]"f"(s2), [s3]"f"(s3),
-          [o0]"r"(fp32_out_chunk +  0), [o1]"r"(fp32_out_chunk + 16),
-          [o2]"r"(fp32_out_chunk + 32), [o3]"r"(fp32_out_chunk + 48)
+          [o0]"r"(fp32_out +  0), [o1]"r"(fp32_out + 16),
+          [o2]"r"(fp32_out + 32), [o3]"r"(fp32_out + 48)
         : "memory", "t0",
           "v0", "v1", "v2", "v3", "v8", "v9"
     );
-}
-
-static inline void dequant_row_native(const uint8_t *pk_row,
-                                      const uint8_t *sc_row,
-                                      float fp32_out[HEAD_DIM]) {
-    /* HEAD_DIM/64 chunks of 64 elements each (4 NVFP4 blocks per chunk).
-     * For HEAD_DIM=64 one chunk; for HEAD_DIM=128 two chunks; etc. */
-    const int chunks = HEAD_DIM / 64;
-    for (int c = 0; c < chunks; c++) {
-        dequant_64elt_chunk(pk_row + c * 32,
-                            sc_row + c * 4,
-                            fp32_out + c * 64);
-    }
 }
 
 int main(void) {
@@ -129,8 +124,12 @@ int main(void) {
     uint8_t *V_sc = (uint8_t *)malloc(K_SCALE_BYTES);
     bf16_t  *Q    = (bf16_t  *)malloc(N_HEADS * HEAD_DIM * sizeof(bf16_t));
     bf16_t  *O    = (bf16_t  *)malloc(N_HEADS * HEAD_DIM * sizeof(bf16_t));
-    /* Pre-widened Q (workaround for GCC 13.2 vsetvli pass + GCC 14.2 -O2
-     * asm-intrinsic interaction; see paper §7.7 + gcc_bug_report.md). */
+    /* Pre-widened Q in FP32.  Avoids needing bf16_load_widen (vle16 +
+     * vzext.vf2 + vsll.vi) inside the QK inner loop, which GCC 13.2's
+     * RVV vsetvli pass mis-optimizes after the dequant asm block (no
+     * e32-m2 vsetvli emitted between the vle16 and the vzext, so vzext
+     * runs at e16 m1 reading bytes instead of u16s).  Q is small
+     * (8 x 64 x 4B = 2 KiB) so the extra storage is negligible. */
     float   *Q_fp32 = (float *)malloc(N_HEADS * HEAD_DIM * sizeof(float));
     if (!K_pk || !K_sc || !V_pk || !V_sc || !Q || !O || !Q_fp32) {
         fprintf(stderr, "alloc failed\n"); return 1;
@@ -250,15 +249,31 @@ int main(void) {
         float inv_sum = 1.0f / sum_p;
         const float row_dequant_scale = inv_sum / 448.0f;
 
-        /* FP8 quant: P_fp32 (unnormalized exp) * 448 -> BF16 -> E4M3.
-         * Matches bench_fa_mixed_rvv.c (J3 mixed, proper). row_dequant_scale
-         * = inv_sum/448 below folds in the per-row scale.  Native FU
-         * variant via vfconv.bf16.fp8.v is in `bench_fa_mixed_rvv_native_allfu.c`
-         * — verified correct, but cycle-neutral-to-negative on gem5's
-         * single-instruction-latency FU stub (see paper §7.5 sidebar). */
-        for (int s = 0; s < SEQ_LEN; s++) {
-            bf16_t p_bf16 = fp32_to_bf16(P_fp32[s] * 448.0f);
-            P_fp8[s] = bf16_to_e4m3(p_bf16);
+        /* Native FP8 quant via vfconv.bf16.fp8.v (see file header). */
+        {
+            const float P_SCALE = 448.0f;
+            int n = SEQ_LEN;
+            const float *Pp = P_fp32;
+            uint8_t *Fp = P_fp8;
+            asm volatile (
+                "1:\n\t"
+                "vsetivli  x0, 16, e32, m2, ta, ma\n\t"
+                "vle32.v   v0, (%[Pp])\n\t"
+                "vfmul.vf  v0, v0, %[scale]\n\t"
+                "vsetivli  x0, 16, e16, m1, ta, ma\n\t"
+                "vnsrl.wi  v4, v0, 16\n\t"
+                ".4byte    0x4E441257\n\t"   /* vfconv.bf16.fp8.v v4, v4 */
+                "vsetivli  x0, 16, e8, mf2, ta, ma\n\t"
+                "vnsrl.wi  v6, v4, 0\n\t"
+                "vse8.v    v6, (%[Fp])\n\t"
+                "addi      %[Pp], %[Pp], 64\n\t"
+                "addi      %[Fp], %[Fp], 16\n\t"
+                "addi      %[n], %[n], -16\n\t"
+                "bnez      %[n], 1b\n\t"
+                : [Pp]"+r"(Pp), [Fp]"+r"(Fp), [n]"+r"(n)
+                : [scale]"f"(P_SCALE)
+                : "memory", "v0", "v1", "v2", "v3", "v4", "v5", "v6"
+            );
         }
 
         for (int d = 0; d < HEAD_DIM; d++) O_fp32[d] = 0.0f;

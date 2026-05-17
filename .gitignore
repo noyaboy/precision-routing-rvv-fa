@@ -25,6 +25,7 @@ saturn-fu/project/project/
 # Microbench compiled binaries + sim runs (regeneratable)
 microbench-fa/bench_fa_*
 !microbench-fa/bench_fa_*.c
+!microbench-fa/bench_fa_*.h
 microbench-fa/run/
 
 microbench-j4/test_v*
