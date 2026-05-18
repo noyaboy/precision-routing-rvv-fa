@@ -1,0 +1,74 @@
+cff-version: 1.2.0
+message: >-
+  If you use this artifact in your research, please cite the
+  associated MLArchSys 2027 workshop submission (currently under
+  preparation) and/or this software repository.
+title: >-
+  Precision-Routing RVV Flash Attention: Compiler-Scheduled
+  Custom Conversion Lanes for Edge LLM Inference
+type: software
+authors:
+  - alias: noyaboy
+    # TODO: replace with given-names / family-names + affiliation
+    # before non-anonymous release / camera-ready submission.
+license: BSD-3-Clause
+repository-code: "https://github.com/noyaboy/precision-routing-rvv-fa"
+url: "https://github.com/noyaboy/precision-routing-rvv-fa"
+abstract: >-
+  Open-source artifact for a co-designed mixed-precision fused
+  flash-attention stack on the Berkeley Saturn RVV vector unit.
+  Four RVV custom instructions on Saturn (vfconv.{nvfp4,bf16,fp8}.*
+  + vfexp.v) with bit-exact RTL (57/57 ChiselTests) at 0.317 mm²
+  standalone @ 16 nm. A gem5 5.1 RISC-V decoder + FU-latency patch
+  issues all four customs natively. An Exo 2 @instr library +
+  precision-routing scheduling pass lowers a high-level FA @proc
+  to the fused decode-step kernel, running on gem5 at 1.21× the
+  hand-coded reference (5.74 M cyc / 0.631 IPC at L2K, vs 4.76 M
+  cyc / 1.366 IPC hand-coded). Verified 3.56× KV-cache
+  DRAM-bandwidth reduction and 26-39 % per-row cycle speedup over a
+  software-dequant mixed-precision baseline.
+keywords:
+  - "RISC-V"
+  - "RVV"
+  - "vector extension"
+  - "large language models"
+  - "LLM inference"
+  - "flash attention"
+  - "mixed precision"
+  - "NVFP4"
+  - "microscale FP"
+  - "compiler co-design"
+  - "scheduling DSL"
+  - "Exo"
+  - "Saturn"
+  - "Berkeley Saturn"
+  - "Chipyard"
+  - "gem5"
+  - "open hardware"
+preferred-citation:
+  type: conference-paper
+  title: >-
+    Precision-Routing RVV Flash Attention: Compiler-Scheduled
+    Custom Conversion Lanes for Edge LLM Inference
+  authors:
+    - alias: noyaboy
+      # TODO: replace with given-names / family-names + affiliation
+      # before non-anonymous release / camera-ready submission.
+  year: 2027
+  collection-type: proceedings
+  collection-title: >-
+    Proceedings of the Workshop on ML for Computer Architecture
+    and Systems (MLArchSys 2027)
+  conference:
+    name: MLArchSys
+  status: in-preparation
+identifiers:
+  - type: url
+    value: "https://github.com/noyaboy/precision-routing-rvv-fa"
+    description: "Main project repository"
+  - type: url
+    value: "https://github.com/noyaboy/exo-saturn-rvv"
+    description: "Exo 2 fork — Saturn RVV @instr platform + scheduling pass"
+  - type: url
+    value: "https://github.com/noyaboy/gem5-saturn-fu"
+    description: "gem5 fork — RISC-V decoder + FU-latency patches for the 4 Saturn customs"
