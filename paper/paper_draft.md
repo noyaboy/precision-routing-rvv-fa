@@ -9,29 +9,27 @@ the companion notebook `paper_drafting_notes.md`.
 ## Abstract
 
 Edge LLM inference is shifting to open RISC-V silicon, and the open
-RVV software stack has caught up: upstream llama.cpp ships a
-polynomial RVV softmax kernel and a SpacemiT-K1-tuned fused
-flash-attention path. The gap is *precision routing*: open
-RVV attention pins every stage to one precision, leaving NVFP4
-microscale block-16's headline 3.56× KV-cache bandwidth savings
-unrealized in cycles. We present a mixed-precision fused
-flash-attention stack: **(i)** four new RVV custom instructions on
+RVV software stack has caught up: upstream llama.cpp ships RVV
+softmax and a SpacemiT-K1 fused flash-attention path. The gap is
+*precision routing*: open RVV attention pins every stage to one
+precision, leaving NVFP4 microscale block-16's 3.56× KV-cache
+bandwidth savings unrealized in cycles. We present a mixed-precision
+fused flash-attention stack: **(i)** four new RVV customs on
 Berkeley Saturn (`vfconv.{nvfp4,bf16,fp8}.*` + a 10-stage `vfexp.v`)
-with bit-exact RTL (57/57 ChiselTests, sweeps to 65 K cases per
-lane) at 0.317 mm² standalone (6.3 % of Saturn) or 0.055 mm²
-FMA-shared (1.1 %) @ 16 nm; **(ii)** a gem5 5.1 decoder + FU-latency
-patch that issues all four customs natively; **(iii)** an Exo 2
-`@instr` library + precision-routing scheduling pass lowering a
-high-level FA `@proc` to a measured **1.046× hand-coded** kernel
-on gem5 — PASS at ≤10 % (§5). On gem5 RiscvO3CPU (hd = 64, seq_len 2 K–16 K)
-we verify a **3.56× KV-cache DRAM-bandwidth reduction** and a
-**26–39 % per-row cycle speedup** of the FU-integrated path over a
-software-dequant baseline. The literal ≥1.5× speedup over BF16 RVV
-holds only at L2 K (1.59×, within 6 % of the target) — BF16 RVV
-stays compute-bound on our DDR3-1600 configuration; §7.6 frames the
-literal speedup as a memory-subsystem property projected for
-HBM-class systems, with the FU-integration delta verified
-independently. All RTL, gem5 patches, kernels, and Exo
+with bit-exact RTL (57/57 ChiselTests, 65 K-case sweeps per lane)
+at 0.317 mm² standalone (6.3 % of Saturn) or 0.055 mm² FMA-shared
+(1.1 %) @ 16 nm; **(ii)** a gem5 5.1 decoder + FU-latency patch
+issuing all four customs natively; **(iii)** an Exo 2 `@instr`
+library + precision-routing pass lowering a high-level FA `@proc`
+to an Exo-emitted kernel that **meets ≤10 % compiler-parity across
+L 2 K–16 K and beats the hand-coded reference by 13–15 % at
+L ≥ 4 K** (§5). On gem5 RiscvO3CPU we verify a **3.56× KV-cache
+DRAM-bandwidth reduction** and **26–39 % per-row cycle speedup**
+of the FU-integrated path over software-dequant. The literal
+≥1.5× over BF16 RVV holds at L 2 K only (1.59×); BF16 RVV stays
+compute-bound on DDR3-1600 and §7.6 frames the literal speedup
+as projected for HBM-class systems, FU-integration delta
+verified independently. All RTL, gem5 patches, kernels, and Exo
 declarations open-source.
 
 **Keywords**: RISC-V, RVV, large language models, flash attention,
@@ -136,11 +134,14 @@ assumption.
    lowers a high-level `fa_kernel_decode_naive` @proc to the §6
    fused-FA decode-step kernel through 14 sub-schedules; all four
    Saturn customs reachable from the @instr surface. The
-   Exo-generated kernel runs end-to-end on gem5 at **5.74 M cyc /
-   0.631 IPC at L2K — 1.046× the hand-coded reference, meeting
-   the ≤10 % compiler-parity PASS target** (down from 1.12× before
-   targeted intrinsic-rewrite optimisation, §5.6). See §5 for the
-   @instr library + pass design and §7.5 for the cycle measurement.
+   Exo-generated kernel runs end-to-end on gem5 across the full
+   L2 K–L16 K sweep: **PASS at every length (1.046 × / 0.867 × /
+   0.850 × / 0.848 × Exo-to-hand-coded cycle ratio), strictly
+   beating the hand-coded reference at L ≥ 4 K by 13–15 %** — a
+   methodological result showing scheduling-DSL emission matches
+   *and outperforms* domain-expert hand-coded RVV at long-context
+   workloads where the OoO core's IPC ceiling caps ILP-dense code
+   (§5.6). See §5 for the @instr library + pass design.
 5. **Verified fused-FA-kernel cycle measurement on gem5 RiscvO3CPU**:
    full L2 K–L16 K sweep, native FU integration vs (a) BF16 RVV
    reference, (b) mixed-RVV software-dequant baseline, (c) a
@@ -655,48 +656,83 @@ at VLEN ∈ {128, 256, 512} as part of the Y2 SoC-evaluation work.
 
 Our compiler-parity question is: *Exo-generated mixed-precision FA
 within 10 % of hand-coded?* The hand-coded reference is the kernel
-in §6 (`bench_fa_mixed_rvv_native_g14` measured at L2K = 5.49 M
-cyc / 2.40 IPC on the same gem5 RiscvO3CPU + DDR3-1600 config as
-§7.5 Table 5).
+in §6 measured across the full L-sweep on the same gem5 RiscvO3CPU
++ DDR3-1600 config as §7.5 Table 5.
 
-The first end-to-end Exo-generated measurement (all 4 Saturn
-customs + the 10 standard-RVV @instrs invoked through the pass)
-ran the §6 kernel at **6.17 M cyc / 0.652 IPC at L2K** — **1.12×
+The first end-to-end Exo-generated measurement at L 2 K (all 4
+Saturn customs + the 10 standard-RVV @instrs invoked through the
+pass) ran the §6 kernel at **6.17 M cyc / 0.652 IPC** — **1.12×
 the hand-coded baseline**, just outside the ≤10 % PASS threshold.
 A targeted optimisation pass — rewriting the 4 standard-RVV
 asm-volatile macros (BF16↔FP32 widen/narrow, vfredmax,
 vfredusum) as intrinsic-based @instr templates — closed the gap
 to **5.74 M cyc / 0.631 IPC, 1.046× — meeting the ≤1.10 ×
-compiler-parity PASS target.**
+compiler-parity PASS target at L 2 K.**
 
-The IPC delta (0.631 vs hand-coded's 2.40) is striking despite
-the cycle-near-parity. Hand-coded executes ~13.2 M instructions
-at high OoO overlap; the Exo-generated kernel executes ~3.6 M
-instructions but each asm-volatile Saturn macro is a
-serialization barrier that prevents the OoO core from overlapping
-adjacent operations. The two paths arrive at near-identical
-cycle counts via opposite balances: hand-coded gets there through
-dense IPC, Exo gets there through fewer-but-denser instructions.
+Extending the measurement to the full L-sweep yields **Table 6**:
 
-Headroom for further optimisation (beyond the just-met PASS):
-the remaining 4.6 pp delta decomposes into ~250 K cycles of
-explicit asm-volatile vsetvli barriers (GCC vsetvli-pass
-workaround), ~150 K cycles of reduction asm boundaries, ~100 K
-cycles of remaining Saturn .4byte custom asm-volatile overhead,
-and ~40 K cycles of scalar bookkeeping. Three optimisation paths
+| seq_len | Exo cycles | Exo IPC | Hand-coded cycles | Hand-coded IPC | Exo / hand | PASS (≤1.10 ×) |
+|--------:|-----------:|--------:|------------------:|---------------:|-----------:|----------------|
+|   2 K   |   5.74 M   | 0.631   |    5.49 M         | 2.40           | **1.046 ×** | **MET**        |
+|   4 K   |  11.47 M   | 0.631   |   13.23 M         | 1.99           | **0.867 ×** | **MET (Exo +13 %)** |
+|   8 K   |  22.91 M   | 0.632   |   26.95 M         | 1.95           | **0.850 ×** | **MET (Exo +15 %)** |
+|  16 K   |  45.83 M   | 0.632   |   54.07 M         | 1.94           | **0.848 ×** | **MET (Exo +15 %)** |
+
+The L-sweep shows a clear crossover. At L 2 K the Exo kernel is
+marginally slower than hand-coded (1.046×, just inside the PASS
+threshold); **from L 4 K onward Exo consistently beats the
+hand-coded reference by 13–15 %**. The crossover happens between
+L 2 K and L 4 K and the gap stabilises around 0.85 × from L 4 K
+through L 16 K. Mo 8's PASS is met at every tested seq_len; at
+three of four it is strictly beaten.
+
+Two mechanisms explain the crossover. **First**, scaling
+behaviour: Exo cycles scale linearly with seq_len (5.74 → 11.47
+→ 22.91 → 45.83 ≈ exactly 2× per doubling); hand-coded scales
+super-linearly at the first step (5.49 → 13.23 = 2.41×) and
+stabilises at 2.0× thereafter. The extra ~10 % overhead at the
+L 4 K step alone flips the verdict. **Second**, IPC under chain
+pressure: hand-coded's tight intrinsic-rich loop at L 2 K
+achieves 2.40 IPC — near the OoO core's theoretical ceiling — but
+drops to 1.94–1.99 at L ≥ 4 K as ROB saturation, chain
+cancellation, and LSU port contention bite. Exo's IPC is flat at
+0.631 across all L. The kernel emits fewer-but-denser
+instructions (~3.6 M at L 2 K, ~28.95 M at L 16 K — ~3.6 ×
+fewer than hand-coded at every scale), and the asm-volatile
+Saturn customs cap each dependency chain. When the OoO core hits
+its IPC ceiling, the kernel with fewer instructions wins.
+
+This is the methodological contribution of Mo 8: scheduling-DSL-
+emitted code does not just *match* a domain-expert hand-coded
+kernel at small workloads — at workloads where ILP pressure caps
+IPC (the realistic case for production decoder kernels at long
+context), the scheduling-DSL kernel **outperforms** the
+hand-coded one. The dependency chain shapes are explicit and
+bounded by construction in the DSL, while hand-coded chains grow
+implicitly with seq_len.
+
+Headroom for further optimisation (only relevant at L 2 K, where
+the result is just inside the PASS threshold): the 4.6 pp
+residual at L 2 K decomposes into ~250 K cycles of explicit
+asm-volatile vsetvli barriers (GCC vsetvli-pass workaround,
+§7.7), ~150 K cycles of reduction asm boundaries, ~100 K cycles
+of remaining Saturn .4byte custom asm-volatile overhead, and
+~40 K cycles of scalar bookkeeping. Three optimisation paths
 remain available: (a) GCC intrinsic support for the Saturn
-customs (upstream, would eliminate the per-call clobber zone for
-the .4byte ops), (b) register-subview support in Exo's
-SaturnRVV memory class to enable register-resident m4 dequant,
-(c) peephole-merge of consecutive asm-volatile macros sharing
-SEW/LMUL. None are needed to meet the PASS target; all would
-push the result further into the "under target" zone.
+customs (upstream, would eliminate the per-call clobber zone),
+(b) register-subview support in Exo's SaturnRVV memory class to
+enable register-resident m4 dequant, (c) peephole-merge of
+consecutive asm-volatile macros sharing SEW/LMUL. None are
+needed at L ≥ 4 K where Exo already wins.
 
 For our headline contribution — the compiler co-design loop is
 closed end-to-end through gem5 with all four Saturn customs
-reachable through Exo, and the cycle delta meets the ≤10 %
-compiler-parity threshold — the **1.046× result is the verified
-PASS measurement** for Mo 8.
+reachable through Exo, the cycle delta meets the ≤10 %
+compiler-parity threshold across the full L 2 K – L 16 K sweep,
+and at long context Exo **outperforms** the hand-coded
+reference — the **L-sweep result is the verified PASS
+measurement** for Mo 8. Full data and reproduction recipes:
+`paper/mo8_lsweep_results.md`.
 
 ---
 
@@ -1338,14 +1374,18 @@ The compiler co-design loop is closed end-to-end: the Exo
 precision-routing pass (§5.5) lowers a high-level
 `fa_kernel_decode_naive` @proc through 14 sub-schedules to the §6
 kernel, with all four Saturn customs reachable from the @instr
-surface. The Exo-generated kernel runs on gem5 at **1.046× the
-hand-coded reference at L2K** (5.74 M cyc / 0.631 IPC vs 5.49 M
-cyc / 2.40 IPC) — **meeting the ≤10 % compiler-parity PASS
-target**. The 4.6 pp residual is decomposed in §5.6; three
-optional optimisation paths (upstream GCC intrinsics for the
-Saturn customs, Exo register-subview support, and peephole-merge
-of consecutive asm-volatile macros) would extend the result
-further into the under-target zone but are not required for PASS.
+surface. The Exo-generated kernel runs on gem5 across the full
+L2 K – L16 K sweep at **PASS at every tested length (1.046 × /
+0.867 × / 0.850 × / 0.848 ×) — at L ≥ 4 K, Exo strictly beats the
+hand-coded reference by 13–15 %.** The crossover reflects an ILP-
+ceiling effect: hand-coded's IPC drops from 2.40 (L 2 K) to 1.94
+(L 16 K) under chain-pressure, while Exo's IPC is flat at 0.631
+and its instruction-count advantage (~3.6 × fewer than hand-coded
+at every L) stays constant. The L 2 K residual is decomposed in
+§5.6; three optional optimisation paths (upstream GCC intrinsics
+for the Saturn customs, Exo register-subview support, peephole-
+merge of consecutive asm-volatile macros) would tighten the L 2 K
+margin but are not required at L ≥ 4 K.
 
 All RTL (Saturn fork, 57/57 ChiselTests, Yosys-synthesized to a 16 nm
 area estimate), gem5 patches (RISC-V decoder + FU-latency wiring +
@@ -1356,9 +1396,8 @@ main project at `git@github.com:noyaboy/precision-routing-rvv-fa.git`,
 Exo fork at `git@github.com:noyaboy/exo-saturn-rvv.git`,
 gem5 fork at `git@github.com:noyaboy/gem5-saturn-fu.git`. Next steps for the Y2 follow-on: a HBM
 bandwidth model in gem5 to verify the projected ≥1.5× over BF16
-RVV, FireSim integration for real-Saturn-µarch validation,
-optional further compiler-parity optimisations (GCC intrinsic
-support for the Saturn customs would extend the 1.046× result
-further into the under-target zone), and a Llama-3.2-1B E2E
+RVV, FireSim integration for real-Saturn-µarch validation
+(plan in `paper/y2_firesim_prep.md`), optional further
+compiler-parity optimisations at L 2 K, and a Llama-3.2-1B E2E
 speedup measurement on actual silicon.
 
