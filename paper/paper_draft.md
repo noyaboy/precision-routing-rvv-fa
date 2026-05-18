@@ -21,22 +21,18 @@ with bit-exact RTL (57/57 ChiselTests, sweeps to 65 K cases per
 lane) at 0.317 mm² standalone (6.3 % of Saturn) or 0.055 mm²
 FMA-shared (1.1 %) @ 16 nm; **(ii)** a gem5 5.1 decoder + FU-latency
 patch that issues all four customs natively; **(iii)** an Exo 2
-`@instr` library declaring them via a parametric SaturnRVV memory
-class. On gem5 RiscvO3CPU (hd = 64, seq_len 2 K–16 K)
+`@instr` library + precision-routing scheduling pass that lowers a
+high-level FA `@proc` to a measured **1.21× hand-coded** kernel on
+gem5 (§5). On gem5 RiscvO3CPU (hd = 64, seq_len 2 K–16 K)
 we verify a **3.56× KV-cache DRAM-bandwidth reduction** and a
 **26–39 % per-row cycle speedup** of the FU-integrated path over a
-software-dequant baseline. The literal ≥1.5× speedup over BF16 RVV holds only at L2 K (1.59×,
-within 6 % of the target) — BF16 RVV stays compute-bound on our
-DDR3-1600 configuration; §7.6 frames the literal speedup as a
-memory-subsystem property projected for HBM-class systems, with the
-FU-integration delta as the verified hardware contribution. We
-further verify the compiler co-design loop end-to-end: the
-Exo-generated fused FA kernel — composed from 14 sub-schedules over
-the @instr library, with all four Saturn customs reachable through
-the scheduling pass — runs on gem5 at **1.21× the hand-coded
-reference**, with the remaining gap scoped to the asm-volatile cost
-of the Saturn custom encodings (§5.6). All RTL, gem5 patches,
-kernels, and Exo declarations + the scheduling pass open-source.
+software-dequant baseline. The literal ≥1.5× speedup over BF16 RVV
+holds only at L2 K (1.59×, within 6 % of the target) — BF16 RVV
+stays compute-bound on our DDR3-1600 configuration; §7.6 frames the
+literal speedup as a memory-subsystem property projected for
+HBM-class systems, with the FU-integration delta verified
+independently. All RTL, gem5 patches, kernels, and Exo declarations
++ the scheduling pass open-source.
 
 **Keywords**: RISC-V, RVV, large language models, flash attention,
 mixed precision, NVFP4, microscale FP, compiler co-design, scheduling
