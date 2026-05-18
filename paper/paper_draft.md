@@ -1394,10 +1394,16 @@ scheduling pass, and end-to-end kernel source open-source under
 permissive license. Artifact repositories:
 main project at `git@github.com:noyaboy/precision-routing-rvv-fa.git`,
 Exo fork at `git@github.com:noyaboy/exo-saturn-rvv.git`,
-gem5 fork at `git@github.com:noyaboy/gem5-saturn-fu.git`. Next steps for the Y2 follow-on: a HBM
-bandwidth model in gem5 to verify the projected ≥1.5× over BF16
-RVV, FireSim integration for real-Saturn-µarch validation
-(plan in `paper/y2_firesim_prep.md`), optional further
-compiler-parity optimisations at L 2 K, and a Llama-3.2-1B E2E
-speedup measurement on actual silicon.
+gem5 fork at `git@github.com:noyaboy/gem5-saturn-fu.git`. The Y2
+follow-on extends this paper's *static* precision-routing pass
+to a **compiler-scheduled per-layer precision policy** — picking
+per-decoder-layer dtype configurations on the same Saturn FU
+lanes, evaluated on Llama-3.2-1B/3B end-to-end. The novelty is
+in the scheduling-DSL machinery (the per-layer policy is a
+schedule attribute, not a new low-precision algorithm); existing
+NVFP4-PTQ algorithm work [Anonymous, arXiv'26] supplies the
+weight-side quantisation. FireSim integration (plan in
+`paper/y2_firesim_prep.md`) provides Y2's hardware-fidelity
+validation track; an HBM bandwidth model in gem5 closes the
+literal ≥1.5× projection from §7.6 as a supporting result.
 
