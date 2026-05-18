@@ -1,7 +1,7 @@
 # Y1 next-session warmup prompt
 
 Copy-paste this into a fresh Claude Code session at
-`/home/noah/project/riscv/` to start the next session on this project.
+`./` to start the next session on this project.
 
 ---
 

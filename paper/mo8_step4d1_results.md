@@ -109,10 +109,10 @@ or near the Mo 8 PASS target.
 ## Reproducibility
 
 ```
-cd /home/noah/project/riscv/microbench-fa-exo
+cd ./microbench-fa-exo
 # Regenerate Exo C/H (picks up the new intrinsic-based @instr templates):
-python3 -c "import sys; sys.path.insert(0,'/home/noah/project/riscv'); \
-  sys.path.insert(0,'/home/noah/project/riscv/exo/src'); \
+python3 -c "import sys; sys.path.insert(0,'.'); \
+  sys.path.insert(0,'./exo/src'); \
   from exo.API import compile_procs_to_strings; \
   from paper.exo_schedule_fa import schedule_fa_kernel_decode; \
   c,h = compile_procs_to_strings([schedule_fa_kernel_decode()],'exo_schedule_fa.h'); \
@@ -120,13 +120,13 @@ python3 -c "import sys; sys.path.insert(0,'/home/noah/project/riscv'); \
   open('exo_schedule_fa.h','w').write(h)"
 
 # Build:
-PATH=/tmp/bootlin-14/riscv64-lp64d--glibc--bleeding-edge-2024.05-1/bin:$PATH make bench_fa_exo
+PATH=/path/to/bootlin-riscv64-gcc14/bin:$PATH make bench_fa_exo
 
 # Run on gem5 (same launch as step 4c):
 mkdir -p run/4d1_l2k
-/home/noah/project/riscv/gem5/build/RISCV/gem5.opt \
+./gem5/build/RISCV/gem5.opt \
   --outdir=run/4d1_l2k \
-  /home/noah/project/riscv/gem5/configs/deprecated/example/se.py \
+  ./gem5/configs/deprecated/example/se.py \
   --cpu-type=RiscvO3CPU --num-cpus=2 \
   --caches --l1d_size=32KiB --l1i_size=32KiB \
   --l2cache --l2_size=512KiB \

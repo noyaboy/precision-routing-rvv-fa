@@ -262,7 +262,7 @@ load / vfmacc.vf / O store).
 ## Reproducibility
 
 ```
-cd /home/noah/project/riscv
+cd .
 pip install -e exo/
 python3 paper/exo_schedule_fa.py     # 11/11 schedules; 21 markers
 ```

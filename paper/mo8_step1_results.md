@@ -116,7 +116,7 @@ head_dim tiling for one chunk type (NVFP4 → BF16 dequant). Remaining:
 ## Reproducibility
 
 ```
-cd /home/noah/project/riscv
+cd .
 pip install -e exo/                        # editable install of Saturn-extended Exo fork
 python3 paper/exo_schedule_fa.py           # emits + verifies markers + prints C bodies
 ```
@@ -126,16 +126,16 @@ For the disassembly probe:
 ```
 mkdir -p /tmp/mo8s1 && cd /tmp/mo8s1
 python3 -c "
-import sys; sys.path.insert(0, '/home/noah/project/riscv')
-sys.path.insert(0, '/home/noah/project/riscv/exo/src')
+import sys; sys.path.insert(0, '.')
+sys.path.insert(0, './exo/src')
 from exo.API import compile_procs_to_strings
 from paper.exo_schedule_fa import schedule_dequant_chunk, schedule_softmax_exp_chunk, schedule_dequant_64
 c, h = compile_procs_to_strings([schedule_dequant_chunk(), schedule_softmax_exp_chunk(), schedule_dequant_64()], 'exo_schedule_fa.h')
 open('exo_schedule_fa.c','w').write('#include \"exo_schedule_fa.h\"\n' + c)
 open('exo_schedule_fa.h','w').write(h)
 "
-/tmp/bootlin-14/riscv64-lp64d--glibc--bleeding-edge-2024.05-1/bin/riscv64-linux-gcc \
+/path/to/bootlin-riscv64-gcc14/bin/riscv64-linux-gcc \
     -O2 -march=rv64gcv -mabi=lp64d -c exo_schedule_fa.c -o exo_schedule_fa.o
-/tmp/bootlin-14/riscv64-lp64d--glibc--bleeding-edge-2024.05-1/bin/riscv64-linux-objdump \
+/path/to/bootlin-riscv64-gcc14/bin/riscv64-linux-objdump \
     -d exo_schedule_fa.o
 ```

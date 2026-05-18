@@ -212,7 +212,7 @@ Static count in the object:
 ## Reproducibility
 
 ```
-cd /home/noah/project/riscv
+cd .
 pip install -e exo/
 python3 paper/exo_schedule_fa.py     # 9/9 schedules; 19 markers
 ```

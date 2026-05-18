@@ -143,7 +143,7 @@ Same recipe as step 1; the new schedule is exercised by the existing
 demo entry point:
 
 ```
-cd /home/noah/project/riscv
+cd .
 python3 paper/exo_schedule_fa.py           # 4/4 schedules; 9 markers
 ```
 
@@ -151,8 +151,8 @@ Disassembly probe (re-uses /tmp/mo8s1/ from step 1):
 
 ```
 python3 -c "
-import sys; sys.path.insert(0, '/home/noah/project/riscv')
-sys.path.insert(0, '/home/noah/project/riscv/exo/src')
+import sys; sys.path.insert(0, '.')
+sys.path.insert(0, './exo/src')
 from exo.API import compile_procs_to_strings
 from paper.exo_schedule_fa import (schedule_dequant_chunk,
     schedule_softmax_exp_chunk, schedule_dequant_64,
@@ -164,9 +164,9 @@ c, h = compile_procs_to_strings(
 open('/tmp/mo8s1/exo_schedule_fa.c','w').write('#include \"exo_schedule_fa.h\"\n'+c)
 open('/tmp/mo8s1/exo_schedule_fa.h','w').write(h)
 "
-/tmp/bootlin-14/riscv64-lp64d--glibc--bleeding-edge-2024.05-1/bin/riscv64-linux-gcc \
+/path/to/bootlin-riscv64-gcc14/bin/riscv64-linux-gcc \
     -O2 -march=rv64gcv -mabi=lp64d -c /tmp/mo8s1/exo_schedule_fa.c \
     -o /tmp/mo8s1/exo_schedule_fa.o
-/tmp/bootlin-14/riscv64-lp64d--glibc--bleeding-edge-2024.05-1/bin/riscv64-linux-objdump \
+/path/to/bootlin-riscv64-gcc14/bin/riscv64-linux-objdump \
     -d /tmp/mo8s1/exo_schedule_fa.o | sed -n '/fa_dequant_per_row_naive/,/<softmax_exp_chunk_naive>/p'
 ```

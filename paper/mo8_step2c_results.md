@@ -217,7 +217,7 @@ merges adjacent macros sharing SEW/LMUL. Step 4 (cycle parity vs
 ## Reproducibility
 
 ```
-cd /home/noah/project/riscv
+cd .
 pip install -e exo/                        # picks up new @instrs in fork
 python3 paper/exo_schedule_fa.py           # 6/6 schedules; 14 markers
 ```
@@ -227,8 +227,8 @@ Disassembly probe:
 ```
 cd /tmp/mo8s1
 python3 -c "
-import sys; sys.path.insert(0, '/home/noah/project/riscv')
-sys.path.insert(0, '/home/noah/project/riscv/exo/src')
+import sys; sys.path.insert(0, '.')
+sys.path.insert(0, './exo/src')
 from exo.API import compile_procs_to_strings
 from paper.exo_schedule_fa import (schedule_dequant_chunk,
     schedule_softmax_exp_chunk, schedule_dequant_64,
@@ -242,8 +242,8 @@ c, h = compile_procs_to_strings(
 open('exo_schedule_fa.c','w').write('#include \"exo_schedule_fa.h\"\n'+c)
 open('exo_schedule_fa.h','w').write(h)
 "
-/tmp/bootlin-14/riscv64-lp64d--glibc--bleeding-edge-2024.05-1/bin/riscv64-linux-gcc \
+/path/to/bootlin-riscv64-gcc14/bin/riscv64-linux-gcc \
     -O2 -march=rv64gcv -mabi=lp64d -c exo_schedule_fa.c -o exo_schedule_fa.o
-/tmp/bootlin-14/riscv64-lp64d--glibc--bleeding-edge-2024.05-1/bin/riscv64-linux-objdump \
+/path/to/bootlin-riscv64-gcc14/bin/riscv64-linux-objdump \
     -d exo_schedule_fa.o | sed -n '/<online_softmax_chunk_naive>:/,/<qkt_chunk_naive>:/p'
 ```

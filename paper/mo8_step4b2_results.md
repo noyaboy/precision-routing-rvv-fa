@@ -290,7 +290,7 @@ softmax — measurable, addressable.
 ## Reproducibility
 
 ```
-cd /home/noah/project/riscv
+cd .
 pip install -e exo/
 python3 paper/exo_schedule_fa.py     # 13/13 schedules; 23 markers
 ```

@@ -172,7 +172,7 @@ The next session's C harness needs to:
 ## Reproducibility
 
 ```
-cd /home/noah/project/riscv
+cd .
 pip install -e exo/
 python3 paper/exo_schedule_fa.py     # 14/14 schedules; 25 markers
 ```

@@ -86,7 +86,7 @@ to any public host yet** — release-step pending user action.
 
 ### Toolchain (load-bearing)
 
-- **GCC 14.2** at `/tmp/bootlin-14/riscv64-lp64d--glibc--bleeding-edge-2024.05-1/bin/`
+- **GCC 14.2** at `/path/to/bootlin-riscv64-gcc14/bin/`
 - Flags: `-O2 -fno-tree-vectorize` (workaround for GCC 14 -O2 auto-vec bug)
 - Pre-widen-Q workaround in `bench_fa_mixed_rvv_native.c` retained (defensive)
 - GCC 13.2 retained as fallback (older measurements use this)

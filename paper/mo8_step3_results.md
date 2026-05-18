@@ -238,7 +238,7 @@ compare cycles to `bench_fa_mixed_rvv_native`. The shape of step 4:
 ## Reproducibility
 
 ```
-cd /home/noah/project/riscv
+cd .
 python3 paper/exo_schedule_fa.py     # 8/8 schedules; 18 markers
 ```
 
