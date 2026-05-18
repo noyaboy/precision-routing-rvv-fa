@@ -55,16 +55,21 @@ from exo.stdlib.scheduling import *
 from exo.platforms.saturn_rvv import (
     SaturnRVV_M1,
     SaturnRVV_M2,
+    SaturnRVV_M4,                    # Mo 8 step 4d-5: m4 LMUL for NVFP4 dequant
     saturn_vle16_m1,
     saturn_vse16_m1,
+    saturn_vle16_m4,                 # Mo 8 step 4d-5: m4 RVV bridge
+    saturn_vse16_m4,                 # Mo 8 step 4d-5: m4 RVV bridge
     saturn_vle8_m1,                  # Mo 8 step 3: load 16 FP8 bytes (mf2 valid)
     saturn_vse8_m1,                  # Mo 8 step 3: store 16 FP8 bytes (mf2 valid)
     saturn_vle32_m2,
     saturn_vse32_m2,
     vfconv_nvfp4_bf16_v,
+    vfconv_nvfp4_bf16_v_m4,          # Mo 8 step 4d-5: m4 vfconv (64 lanes per call)
     vfconv_bf16_fp8_v,               # Mo 8 step 3: P-quant BF16 -> FP8
     vfconv_fp8_bf16_v,               # Mo 8 step 3: P*V dequant FP8 -> BF16
     vfexp_v,
+    vfexp_f32_v,                     # Mo 8 step 4d-3: FP32-input vfexp variant
     saturn_bf16_widen_f32_m2,        # Mo 8 step 2b: BF16->FP32 widen (vzext+vsll)
     saturn_vfmacc_vv_f32m2,          # Mo 8 step 2b: FP32 vector vfmacc
     saturn_vfmacc_vf_f32m2,          # Mo 8 step 4a: FP32 vector += scalar-broadcast * vector
@@ -832,20 +837,18 @@ def softmax_full_naive(
         for i in seq(0, 16):                            # vfredmax
             m_out[0] = fmaxf(m_out[0], S_reg1[i])
 
-    # Pass 2: sub + narrow + exp + store + sum
+    # Pass 2: sub + exp + store + sum  (step 4d-3: skip FP32->BF16 narrow,
+    # use vfexp_f32_v on FP32 directly — matches bench's hot loop shape).
     for so in seq(0, seq_len / 16):
         S_reg2:    f32[16]
         S_shifted: f32[16]
-        S_bf16:    ui16[16]
         P_reg:     f32[16]
         for i in seq(0, 16):                            # vle32 S chunk
             S_reg2[i] = S_fp32[16 * so + i]
         for i in seq(0, 16):                            # vfsub.vf
             S_shifted[i] = S_reg2[i] - m_out[0]
-        for i in seq(0, 16):                            # F32_NARROW_BF16
-            S_bf16[i] = S_shifted[i]
-        for i in seq(0, 16):                            # vfexp
-            P_reg[i] = S_bf16[i]
+        for i in seq(0, 16):                            # vfexp_f32_v (FP32 in/out)
+            P_reg[i] = S_shifted[i]
         for i in seq(0, 16):                            # vse32 P
             P_fp32[16 * so + i] = P_reg[i]
         for i in seq(0, 16):                            # vfredusum
@@ -856,17 +859,15 @@ def schedule_softmax_full(p=softmax_full_naive, verbose=False):
     p = set_memory(p, "S_reg1",    SaturnRVV_M2)
     p = set_memory(p, "S_reg2",    SaturnRVV_M2)
     p = set_memory(p, "S_shifted", SaturnRVV_M2)
-    p = set_memory(p, "S_bf16",    SaturnRVV_M1)
     p = set_memory(p, "P_reg",     SaturnRVV_M2)
 
     # Pass 1: 2 inner loops per `so` iteration (vle32 + vfredmax).
     p = replace(p, "for i in _: _ #0", saturn_vle32_m2)
     p = replace(p, "for i in _: _ #0", saturn_vfredmax_to_dram_f32m2)
-    # Pass 2: 6 inner loops per `so` iteration.
+    # Pass 2: 5 inner loops per `so` iteration (narrow step gone vs 4d-1).
     p = replace(p, "for i in _: _ #0", saturn_vle32_m2)              # S load
     p = replace(p, "for i in _: _ #0", saturn_vfsub_vf_f32m2)        # S - m
-    p = replace(p, "for i in _: _ #0", saturn_f32_narrow_bf16_m2)    # FP32 -> BF16
-    p = replace(p, "for i in _: _ #0", vfexp_v)                      # vfexp
+    p = replace(p, "for i in _: _ #0", vfexp_f32_v)                  # vfexp (FP32 in/out)
     p = replace(p, "for i in _: _ #0", saturn_vse32_m2)              # P store
     p = replace(p, "for i in _: _ #0", saturn_vfredusum_to_dram_f32m2)
     if verbose:
@@ -967,7 +968,7 @@ def fa_kernel_decode_naive(
         #   For each s in [0, seq_len): dequant K row + Q · K dot product
         # ==================================================================
         for s in seq(0, seq_len):
-            # -- Inlined dequant_row (K side) -----------------------------
+            # -- Inlined dequant_row (K side, m1 — m4 attempt regressed) --
             for kblk in seq(0, 4):
                 K_nvfp4_reg: ui16[16]
                 K_bf16_reg:  ui16[16]
@@ -1016,20 +1017,18 @@ def fa_kernel_decode_naive(
             for i in seq(0, 16):
                 m_state[0] = fmaxf(m_state[0], S_reg1[i])
 
-        # -- Inlined softmax_full Pass 2: sub + narrow + exp + store + sum
+        # -- Inlined softmax_full Pass 2 (step 4d-3: skip FP32->BF16 narrow,
+        #    use FP32-input vfexp_f32_v directly)
         for so2 in seq(0, seq_len / 16):
             S_reg2:    f32[16]
             S_shifted: f32[16]
-            S_bf16:    ui16[16]
             P_reg:     f32[16]
             for i in seq(0, 16):
                 S_reg2[i] = S_fp32[16 * so2 + i]
             for i in seq(0, 16):
                 S_shifted[i] = S_reg2[i] - m_state[0]
             for i in seq(0, 16):
-                S_bf16[i] = S_shifted[i]
-            for i in seq(0, 16):
-                P_reg[i] = S_bf16[i]
+                P_reg[i] = S_shifted[i]
             for i in seq(0, 16):
                 P_fp32[16 * so2 + i] = P_reg[i]
             for i in seq(0, 16):
@@ -1044,7 +1043,7 @@ def fa_kernel_decode_naive(
             O_fp32[h, d] = 0.0
 
         for s in seq(0, seq_len):
-            # -- Inlined dequant_row (V side) -----------------------------
+            # -- Inlined dequant_row (V side, m1) -------------------------
             for vblk in seq(0, 4):
                 V_nvfp4_reg: ui16[16]
                 V_bf16_reg:  ui16[16]
@@ -1094,7 +1093,7 @@ def schedule_fa_kernel_decode(p=fa_kernel_decode_naive, verbose=False):
     many times the loop appears in the @proc body (Exo's IR-level
     replace() abstracts across iterations of outer loops).
     """
-    # ---- Phase 1: K dequant_row × kblk ----
+    # ---- Phase 1: K dequant_row × kblk (m1) ----
     p = set_memory(p, "K_nvfp4_reg", SaturnRVV_M1)
     p = set_memory(p, "K_bf16_reg",  SaturnRVV_M1)
     p = set_memory(p, "K_fp32_reg",  SaturnRVV_M2)
@@ -1117,18 +1116,16 @@ def schedule_fa_kernel_decode(p=fa_kernel_decode_naive, verbose=False):
     p = set_memory(p, "S_reg1", SaturnRVV_M2)
     p = replace(p, "for i in _: _ #0", saturn_vle32_m2)              # S load
     p = replace(p, "for i in _: _ #0", saturn_vfredmax_to_dram_f32m2)  # vfredmax
-    # ---- Phase 2: softmax pass 2 ----
+    # ---- Phase 2: softmax pass 2 (step 4d-3: narrow gone) ----
     p = set_memory(p, "S_reg2",    SaturnRVV_M2)
     p = set_memory(p, "S_shifted", SaturnRVV_M2)
-    p = set_memory(p, "S_bf16",    SaturnRVV_M1)
     p = set_memory(p, "P_reg",     SaturnRVV_M2)
     p = replace(p, "for i in _: _ #0", saturn_vle32_m2)              # S load
     p = replace(p, "for i in _: _ #0", saturn_vfsub_vf_f32m2)        # S - m
-    p = replace(p, "for i in _: _ #0", saturn_f32_narrow_bf16_m2)    # narrow
-    p = replace(p, "for i in _: _ #0", vfexp_v)                      # vfexp
+    p = replace(p, "for i in _: _ #0", vfexp_f32_v)                  # vfexp (FP32 in/out)
     p = replace(p, "for i in _: _ #0", saturn_vse32_m2)              # P store
     p = replace(p, "for i in _: _ #0", saturn_vfredusum_to_dram_f32m2)  # sum
-    # ---- Phase 3: V dequant_row × vblk ----
+    # ---- Phase 3: V dequant_row × vblk (m1) ----
     p = set_memory(p, "V_nvfp4_reg", SaturnRVV_M1)
     p = set_memory(p, "V_bf16_reg",  SaturnRVV_M1)
     p = set_memory(p, "V_fp32_reg",  SaturnRVV_M2)

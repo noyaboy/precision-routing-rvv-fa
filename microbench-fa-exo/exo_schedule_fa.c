@@ -20,6 +20,23 @@
       : "memory", "v8", "v9");                                             \
 } while (0)
 
+/* vfexp.v at SEW=32/m2 — FP32 input, FP32 output. Matches the
+ * bench's inline-asm shortcut (bench_fa_mixed_rvv_native.c lines
+ * 226-247): vfexp.v reads register state's current SEW, and the
+ * Saturn VFExpLane RTL (Track E) takes FP32 input directly. This
+ * variant eliminates the FP32 -> BF16 narrow step before vfexp in
+ * softmax Pass 2, saving 1 macro call + 1 vsetvli barrier per
+ * SEQ_LEN/16 chunk. */
+#define SATURN_VFEXP_F32M2(dst, src, vl) do {                              \
+    asm volatile (                                                         \
+      "vsetvli zero, %2, e32, m2, ta, ma\n\t"                              \
+      "vle32.v v8, (%1)\n\t"                                               \
+      ".4byte 0x4E831457\n\t"   /* vfexp.v v8, v8 */                       \
+      "vse32.v v8, (%0)\n\t"                                               \
+      :: "r"(dst), "r"(src), "r"((size_t)(vl))                             \
+      : "memory", "v8", "v9");                                             \
+} while (0)
+
 /* vfconv.fp8.bf16.v vd, vs2   (VS1=0x07, FP8-in / BF16-out, LMUL doubles) */
 #define SATURN_VFCONV_FP8_BF16(dst, src, vl) do {                          \
     asm volatile (                                                         \
@@ -56,6 +73,22 @@
       "vse16.v v0, (%0)\n\t"                                               \
       :: "r"(dst), "r"(src), "r"((size_t)(vl))                             \
       : "memory", "v0");                                                   \
+} while (0)
+
+/* Mo 8 step 4d-5: vfconv.nvfp4.bf16.v at LMUL=4 — processes 64 NVFP4
+ * nibbles per asm-volatile boundary (vs 16 at m1). Matches bench's
+ * dequant_64elt_chunk LMUL=4 layout: 1 vfconv invocation per head_dim=64
+ * row instead of 4 m1 invocations. The result is 64 BF16 lanes spread
+ * across v0-v3 (m4 register group); we stash to DRAM and reload per
+ * 16-lane chunk for the widen + scale. */
+#define SATURN_VFCONV_NVFP4_BF16_M4(dst, src, vl) do {                     \
+    asm volatile (                                                         \
+      "vsetvli zero, %2, e16, m4, ta, ma\n\t"                              \
+      "vle16.v v0, (%1)\n\t"                                               \
+      ".4byte 0x4E049057\n\t"   /* vfconv.nvfp4.bf16.v v0, v0 */           \
+      "vse16.v v0, (%0)\n\t"                                               \
+      :: "r"(dst), "r"(src), "r"((size_t)(vl))                             \
+      : "memory", "v0", "v1", "v2", "v3");                                 \
 } while (0)
 
 /* Mo 8 step 4d-1: Reductions via static-inline helpers using intrinsics.
@@ -107,6 +140,23 @@ static inline float saturn_vfredusum_f32m2_helper(float init,
       : "memory", "v8", "v9");                                             \
 } while (0)
 
+/* vfexp.v at SEW=32/m2 — FP32 input, FP32 output. Matches the
+ * bench's inline-asm shortcut (bench_fa_mixed_rvv_native.c lines
+ * 226-247): vfexp.v reads register state's current SEW, and the
+ * Saturn VFExpLane RTL (Track E) takes FP32 input directly. This
+ * variant eliminates the FP32 -> BF16 narrow step before vfexp in
+ * softmax Pass 2, saving 1 macro call + 1 vsetvli barrier per
+ * SEQ_LEN/16 chunk. */
+#define SATURN_VFEXP_F32M2(dst, src, vl) do {                              \
+    asm volatile (                                                         \
+      "vsetvli zero, %2, e32, m2, ta, ma\n\t"                              \
+      "vle32.v v8, (%1)\n\t"                                               \
+      ".4byte 0x4E831457\n\t"   /* vfexp.v v8, v8 */                       \
+      "vse32.v v8, (%0)\n\t"                                               \
+      :: "r"(dst), "r"(src), "r"((size_t)(vl))                             \
+      : "memory", "v8", "v9");                                             \
+} while (0)
+
 /* vfconv.fp8.bf16.v vd, vs2   (VS1=0x07, FP8-in / BF16-out, LMUL doubles) */
 #define SATURN_VFCONV_FP8_BF16(dst, src, vl) do {                          \
     asm volatile (                                                         \
@@ -143,6 +193,22 @@ static inline float saturn_vfredusum_f32m2_helper(float init,
       "vse16.v v0, (%0)\n\t"                                               \
       :: "r"(dst), "r"(src), "r"((size_t)(vl))                             \
       : "memory", "v0");                                                   \
+} while (0)
+
+/* Mo 8 step 4d-5: vfconv.nvfp4.bf16.v at LMUL=4 — processes 64 NVFP4
+ * nibbles per asm-volatile boundary (vs 16 at m1). Matches bench's
+ * dequant_64elt_chunk LMUL=4 layout: 1 vfconv invocation per head_dim=64
+ * row instead of 4 m1 invocations. The result is 64 BF16 lanes spread
+ * across v0-v3 (m4 register group); we stash to DRAM and reload per
+ * 16-lane chunk for the widen + scale. */
+#define SATURN_VFCONV_NVFP4_BF16_M4(dst, src, vl) do {                     \
+    asm volatile (                                                         \
+      "vsetvli zero, %2, e16, m4, ta, ma\n\t"                              \
+      "vle16.v v0, (%1)\n\t"                                               \
+      ".4byte 0x4E049057\n\t"   /* vfconv.nvfp4.bf16.v v0, v0 */           \
+      "vse16.v v0, (%0)\n\t"                                               \
+      :: "r"(dst), "r"(src), "r"((size_t)(vl))                             \
+      : "memory", "v0", "v1", "v2", "v3");                                 \
 } while (0)
 
 /* Mo 8 step 4d-1: Reductions via static-inline helpers using intrinsics.
@@ -194,6 +260,23 @@ static inline float saturn_vfredusum_f32m2_helper(float init,
       : "memory", "v8", "v9");                                             \
 } while (0)
 
+/* vfexp.v at SEW=32/m2 — FP32 input, FP32 output. Matches the
+ * bench's inline-asm shortcut (bench_fa_mixed_rvv_native.c lines
+ * 226-247): vfexp.v reads register state's current SEW, and the
+ * Saturn VFExpLane RTL (Track E) takes FP32 input directly. This
+ * variant eliminates the FP32 -> BF16 narrow step before vfexp in
+ * softmax Pass 2, saving 1 macro call + 1 vsetvli barrier per
+ * SEQ_LEN/16 chunk. */
+#define SATURN_VFEXP_F32M2(dst, src, vl) do {                              \
+    asm volatile (                                                         \
+      "vsetvli zero, %2, e32, m2, ta, ma\n\t"                              \
+      "vle32.v v8, (%1)\n\t"                                               \
+      ".4byte 0x4E831457\n\t"   /* vfexp.v v8, v8 */                       \
+      "vse32.v v8, (%0)\n\t"                                               \
+      :: "r"(dst), "r"(src), "r"((size_t)(vl))                             \
+      : "memory", "v8", "v9");                                             \
+} while (0)
+
 /* vfconv.fp8.bf16.v vd, vs2   (VS1=0x07, FP8-in / BF16-out, LMUL doubles) */
 #define SATURN_VFCONV_FP8_BF16(dst, src, vl) do {                          \
     asm volatile (                                                         \
@@ -230,6 +313,22 @@ static inline float saturn_vfredusum_f32m2_helper(float init,
       "vse16.v v0, (%0)\n\t"                                               \
       :: "r"(dst), "r"(src), "r"((size_t)(vl))                             \
       : "memory", "v0");                                                   \
+} while (0)
+
+/* Mo 8 step 4d-5: vfconv.nvfp4.bf16.v at LMUL=4 — processes 64 NVFP4
+ * nibbles per asm-volatile boundary (vs 16 at m1). Matches bench's
+ * dequant_64elt_chunk LMUL=4 layout: 1 vfconv invocation per head_dim=64
+ * row instead of 4 m1 invocations. The result is 64 BF16 lanes spread
+ * across v0-v3 (m4 register group); we stash to DRAM and reload per
+ * 16-lane chunk for the widen + scale. */
+#define SATURN_VFCONV_NVFP4_BF16_M4(dst, src, vl) do {                     \
+    asm volatile (                                                         \
+      "vsetvli zero, %2, e16, m4, ta, ma\n\t"                              \
+      "vle16.v v0, (%1)\n\t"                                               \
+      ".4byte 0x4E049057\n\t"   /* vfconv.nvfp4.bf16.v v0, v0 */           \
+      "vse16.v v0, (%0)\n\t"                                               \
+      :: "r"(dst), "r"(src), "r"((size_t)(vl))                             \
+      : "memory", "v0", "v1", "v2", "v3");                                 \
 } while (0)
 
 /* Mo 8 step 4d-1: Reductions via static-inline helpers using intrinsics.
@@ -281,6 +380,23 @@ static inline float saturn_vfredusum_f32m2_helper(float init,
       : "memory", "v8", "v9");                                             \
 } while (0)
 
+/* vfexp.v at SEW=32/m2 — FP32 input, FP32 output. Matches the
+ * bench's inline-asm shortcut (bench_fa_mixed_rvv_native.c lines
+ * 226-247): vfexp.v reads register state's current SEW, and the
+ * Saturn VFExpLane RTL (Track E) takes FP32 input directly. This
+ * variant eliminates the FP32 -> BF16 narrow step before vfexp in
+ * softmax Pass 2, saving 1 macro call + 1 vsetvli barrier per
+ * SEQ_LEN/16 chunk. */
+#define SATURN_VFEXP_F32M2(dst, src, vl) do {                              \
+    asm volatile (                                                         \
+      "vsetvli zero, %2, e32, m2, ta, ma\n\t"                              \
+      "vle32.v v8, (%1)\n\t"                                               \
+      ".4byte 0x4E831457\n\t"   /* vfexp.v v8, v8 */                       \
+      "vse32.v v8, (%0)\n\t"                                               \
+      :: "r"(dst), "r"(src), "r"((size_t)(vl))                             \
+      : "memory", "v8", "v9");                                             \
+} while (0)
+
 /* vfconv.fp8.bf16.v vd, vs2   (VS1=0x07, FP8-in / BF16-out, LMUL doubles) */
 #define SATURN_VFCONV_FP8_BF16(dst, src, vl) do {                          \
     asm volatile (                                                         \
@@ -317,6 +433,22 @@ static inline float saturn_vfredusum_f32m2_helper(float init,
       "vse16.v v0, (%0)\n\t"                                               \
       :: "r"(dst), "r"(src), "r"((size_t)(vl))                             \
       : "memory", "v0");                                                   \
+} while (0)
+
+/* Mo 8 step 4d-5: vfconv.nvfp4.bf16.v at LMUL=4 — processes 64 NVFP4
+ * nibbles per asm-volatile boundary (vs 16 at m1). Matches bench's
+ * dequant_64elt_chunk LMUL=4 layout: 1 vfconv invocation per head_dim=64
+ * row instead of 4 m1 invocations. The result is 64 BF16 lanes spread
+ * across v0-v3 (m4 register group); we stash to DRAM and reload per
+ * 16-lane chunk for the widen + scale. */
+#define SATURN_VFCONV_NVFP4_BF16_M4(dst, src, vl) do {                     \
+    asm volatile (                                                         \
+      "vsetvli zero, %2, e16, m4, ta, ma\n\t"                              \
+      "vle16.v v0, (%1)\n\t"                                               \
+      ".4byte 0x4E049057\n\t"   /* vfconv.nvfp4.bf16.v v0, v0 */           \
+      "vse16.v v0, (%0)\n\t"                                               \
+      :: "r"(dst), "r"(src), "r"((size_t)(vl))                             \
+      : "memory", "v0", "v1", "v2", "v3");                                 \
 } while (0)
 
 /* Mo 8 step 4d-1: Reductions via static-inline helpers using intrinsics.
@@ -368,88 +500,18 @@ static inline float saturn_vfredusum_f32m2_helper(float init,
       : "memory", "v8", "v9");                                             \
 } while (0)
 
-/* vfconv.fp8.bf16.v vd, vs2   (VS1=0x07, FP8-in / BF16-out, LMUL doubles) */
-#define SATURN_VFCONV_FP8_BF16(dst, src, vl) do {                          \
+/* vfexp.v at SEW=32/m2 — FP32 input, FP32 output. Matches the
+ * bench's inline-asm shortcut (bench_fa_mixed_rvv_native.c lines
+ * 226-247): vfexp.v reads register state's current SEW, and the
+ * Saturn VFExpLane RTL (Track E) takes FP32 input directly. This
+ * variant eliminates the FP32 -> BF16 narrow step before vfexp in
+ * softmax Pass 2, saving 1 macro call + 1 vsetvli barrier per
+ * SEQ_LEN/16 chunk. */
+#define SATURN_VFEXP_F32M2(dst, src, vl) do {                              \
     asm volatile (                                                         \
-      "vsetvli zero, %2, e8, mf2, ta, ma\n\t"                              \
-      "vle8.v v8, (%1)\n\t"                                                \
-      "vsetvli zero, %2, e16, m1, ta, ma\n\t"                              \
-      ".4byte 0x4E839057\n\t"   /* vfconv.fp8.bf16.v v0, v8 */             \
-      "vse16.v v0, (%0)\n\t"                                               \
-      :: "r"(dst), "r"(src), "r"((size_t)(vl))                             \
-      : "memory", "v0", "v8");                                             \
-} while (0)
-
-/* vfconv.bf16.fp8.v vd, vs2   (VS1=0x08, BF16-in / FP8-out, LMUL halves) */
-#define SATURN_VFCONV_BF16_FP8(dst, src, vl) do {                          \
-    asm volatile (                                                         \
-      "vsetvli zero, %2, e16, m1, ta, ma\n\t"                              \
-      "vle16.v v8, (%1)\n\t"                                               \
-      ".4byte 0x4E841457\n\t"   /* vfconv.bf16.fp8.v v8, v8 */             \
-      "vsetvli zero, %2, e8, mf2, ta, ma\n\t"                              \
-      "vnsrl.wi v0, v8, 0\n\t"                                             \
-      "vse8.v v0, (%0)\n\t"                                                \
-      :: "r"(dst), "r"(src), "r"((size_t)(vl))                             \
-      : "memory", "v0", "v8");                                             \
-} while (0)
-
-/* vfconv.nvfp4.bf16.v vd, vs2   (VS1=0x09, NVFP4-in / BF16-out;
- * single-source variant — application multiplies by E4M3 scale
- * separately. See paper §4.3 for the fused alternative). */
-#define SATURN_VFCONV_NVFP4_BF16(dst, src, vl) do {                        \
-    asm volatile (                                                         \
-      "vsetvli zero, %2, e16, m1, ta, ma\n\t"                              \
-      "vle16.v v0, (%1)\n\t"                                               \
-      ".4byte 0x4E049057\n\t"   /* vfconv.nvfp4.bf16.v v0, v0 */           \
-      "vse16.v v0, (%0)\n\t"                                               \
-      :: "r"(dst), "r"(src), "r"((size_t)(vl))                             \
-      : "memory", "v0");                                                   \
-} while (0)
-
-/* Mo 8 step 4d-1: Reductions via static-inline helpers using intrinsics.
- *
- * The previous variant declared these as `do { ... } while (0)` macros.
- * Static inline functions let GCC inline + schedule them across
- * surrounding code without the macro's potential scope inhibitions; the
- * critical property is that NO asm-volatile is involved, so the OoO
- * core can overlap reductions with adjacent ops.
- *
- * Used by saturn_vfredmax_to_dram_f32m2 / saturn_vfredusum_to_dram_f32m2.
- * The BF16<->FP32 widen + narrow are no longer macros: their @instr
- * templates emit the intrinsic chain inline at the call site. */
-
-static inline float saturn_vfredmax_f32m2_helper(float init,
-                                                 vfloat32m2_t src,
-                                                 size_t vl) {
-    vfloat32m1_t acc = __riscv_vfmv_v_f_f32m1(init, 1);
-    acc = __riscv_vfredmax_vs_f32m2_f32m1(src, acc, vl);
-    return __riscv_vfmv_f_s_f32m1_f32(acc);
-}
-
-static inline float saturn_vfredusum_f32m2_helper(float init,
-                                                  vfloat32m2_t src,
-                                                  size_t vl) {
-    vfloat32m1_t acc = __riscv_vfmv_v_f_f32m1(init, 1);
-    acc = __riscv_vfredusum_vs_f32m2_f32m1(src, acc, vl);
-    return __riscv_vfmv_f_s_f32m1_f32(acc);
-}
-
-#endif /* SATURN_CUSTOM_ASM_H */
-
-
-#ifndef SATURN_CUSTOM_ASM_H
-#define SATURN_CUSTOM_ASM_H
-#include <stddef.h>
-#include <stdint.h>
-#include <riscv_vector.h>
-
-/* vfexp.v vd, vs2   (VS1=0x06, BF16-in / FP32-out, LMUL doubles) */
-#define SATURN_VFEXP(dst, src, vl) do {                                    \
-    asm volatile (                                                         \
-      "vsetvli zero, %2, e16, m1, ta, ma\n\t"                              \
-      "vle16.v v8, (%1)\n\t"                                               \
-      ".4byte 0x4E831457\n\t"   /* vfexp.v v8, v8 */                       \
       "vsetvli zero, %2, e32, m2, ta, ma\n\t"                              \
+      "vle32.v v8, (%1)\n\t"                                               \
+      ".4byte 0x4E831457\n\t"   /* vfexp.v v8, v8 */                       \
       "vse32.v v8, (%0)\n\t"                                               \
       :: "r"(dst), "r"(src), "r"((size_t)(vl))                             \
       : "memory", "v8", "v9");                                             \
@@ -491,6 +553,22 @@ static inline float saturn_vfredusum_f32m2_helper(float init,
       "vse16.v v0, (%0)\n\t"                                               \
       :: "r"(dst), "r"(src), "r"((size_t)(vl))                             \
       : "memory", "v0");                                                   \
+} while (0)
+
+/* Mo 8 step 4d-5: vfconv.nvfp4.bf16.v at LMUL=4 — processes 64 NVFP4
+ * nibbles per asm-volatile boundary (vs 16 at m1). Matches bench's
+ * dequant_64elt_chunk LMUL=4 layout: 1 vfconv invocation per head_dim=64
+ * row instead of 4 m1 invocations. The result is 64 BF16 lanes spread
+ * across v0-v3 (m4 register group); we stash to DRAM and reload per
+ * 16-lane chunk for the widen + scale. */
+#define SATURN_VFCONV_NVFP4_BF16_M4(dst, src, vl) do {                     \
+    asm volatile (                                                         \
+      "vsetvli zero, %2, e16, m4, ta, ma\n\t"                              \
+      "vle16.v v0, (%1)\n\t"                                               \
+      ".4byte 0x4E049057\n\t"   /* vfconv.nvfp4.bf16.v v0, v0 */           \
+      "vse16.v v0, (%0)\n\t"                                               \
+      :: "r"(dst), "r"(src), "r"((size_t)(vl))                             \
+      : "memory", "v0", "v1", "v2", "v3");                                 \
 } while (0)
 
 /* Mo 8 step 4d-1: Reductions via static-inline helpers using intrinsics.
@@ -545,6 +623,23 @@ static inline float saturn_vfredusum_f32m2_helper(float init,
       : "memory", "v8", "v9");                                             \
 } while (0)
 
+/* vfexp.v at SEW=32/m2 — FP32 input, FP32 output. Matches the
+ * bench's inline-asm shortcut (bench_fa_mixed_rvv_native.c lines
+ * 226-247): vfexp.v reads register state's current SEW, and the
+ * Saturn VFExpLane RTL (Track E) takes FP32 input directly. This
+ * variant eliminates the FP32 -> BF16 narrow step before vfexp in
+ * softmax Pass 2, saving 1 macro call + 1 vsetvli barrier per
+ * SEQ_LEN/16 chunk. */
+#define SATURN_VFEXP_F32M2(dst, src, vl) do {                              \
+    asm volatile (                                                         \
+      "vsetvli zero, %2, e32, m2, ta, ma\n\t"                              \
+      "vle32.v v8, (%1)\n\t"                                               \
+      ".4byte 0x4E831457\n\t"   /* vfexp.v v8, v8 */                       \
+      "vse32.v v8, (%0)\n\t"                                               \
+      :: "r"(dst), "r"(src), "r"((size_t)(vl))                             \
+      : "memory", "v8", "v9");                                             \
+} while (0)
+
 /* vfconv.fp8.bf16.v vd, vs2   (VS1=0x07, FP8-in / BF16-out, LMUL doubles) */
 #define SATURN_VFCONV_FP8_BF16(dst, src, vl) do {                          \
     asm volatile (                                                         \
@@ -581,6 +676,22 @@ static inline float saturn_vfredusum_f32m2_helper(float init,
       "vse16.v v0, (%0)\n\t"                                               \
       :: "r"(dst), "r"(src), "r"((size_t)(vl))                             \
       : "memory", "v0");                                                   \
+} while (0)
+
+/* Mo 8 step 4d-5: vfconv.nvfp4.bf16.v at LMUL=4 — processes 64 NVFP4
+ * nibbles per asm-volatile boundary (vs 16 at m1). Matches bench's
+ * dequant_64elt_chunk LMUL=4 layout: 1 vfconv invocation per head_dim=64
+ * row instead of 4 m1 invocations. The result is 64 BF16 lanes spread
+ * across v0-v3 (m4 register group); we stash to DRAM and reload per
+ * 16-lane chunk for the widen + scale. */
+#define SATURN_VFCONV_NVFP4_BF16_M4(dst, src, vl) do {                     \
+    asm volatile (                                                         \
+      "vsetvli zero, %2, e16, m4, ta, ma\n\t"                              \
+      "vle16.v v0, (%1)\n\t"                                               \
+      ".4byte 0x4E049057\n\t"   /* vfconv.nvfp4.bf16.v v0, v0 */           \
+      "vse16.v v0, (%0)\n\t"                                               \
+      :: "r"(dst), "r"(src), "r"((size_t)(vl))                             \
+      : "memory", "v0", "v1", "v2", "v3");                                 \
 } while (0)
 
 /* Mo 8 step 4d-1: Reductions via static-inline helpers using intrinsics.
@@ -632,6 +743,23 @@ static inline float saturn_vfredusum_f32m2_helper(float init,
       : "memory", "v8", "v9");                                             \
 } while (0)
 
+/* vfexp.v at SEW=32/m2 — FP32 input, FP32 output. Matches the
+ * bench's inline-asm shortcut (bench_fa_mixed_rvv_native.c lines
+ * 226-247): vfexp.v reads register state's current SEW, and the
+ * Saturn VFExpLane RTL (Track E) takes FP32 input directly. This
+ * variant eliminates the FP32 -> BF16 narrow step before vfexp in
+ * softmax Pass 2, saving 1 macro call + 1 vsetvli barrier per
+ * SEQ_LEN/16 chunk. */
+#define SATURN_VFEXP_F32M2(dst, src, vl) do {                              \
+    asm volatile (                                                         \
+      "vsetvli zero, %2, e32, m2, ta, ma\n\t"                              \
+      "vle32.v v8, (%1)\n\t"                                               \
+      ".4byte 0x4E831457\n\t"   /* vfexp.v v8, v8 */                       \
+      "vse32.v v8, (%0)\n\t"                                               \
+      :: "r"(dst), "r"(src), "r"((size_t)(vl))                             \
+      : "memory", "v8", "v9");                                             \
+} while (0)
+
 /* vfconv.fp8.bf16.v vd, vs2   (VS1=0x07, FP8-in / BF16-out, LMUL doubles) */
 #define SATURN_VFCONV_FP8_BF16(dst, src, vl) do {                          \
     asm volatile (                                                         \
@@ -668,6 +796,22 @@ static inline float saturn_vfredusum_f32m2_helper(float init,
       "vse16.v v0, (%0)\n\t"                                               \
       :: "r"(dst), "r"(src), "r"((size_t)(vl))                             \
       : "memory", "v0");                                                   \
+} while (0)
+
+/* Mo 8 step 4d-5: vfconv.nvfp4.bf16.v at LMUL=4 — processes 64 NVFP4
+ * nibbles per asm-volatile boundary (vs 16 at m1). Matches bench's
+ * dequant_64elt_chunk LMUL=4 layout: 1 vfconv invocation per head_dim=64
+ * row instead of 4 m1 invocations. The result is 64 BF16 lanes spread
+ * across v0-v3 (m4 register group); we stash to DRAM and reload per
+ * 16-lane chunk for the widen + scale. */
+#define SATURN_VFCONV_NVFP4_BF16_M4(dst, src, vl) do {                     \
+    asm volatile (                                                         \
+      "vsetvli zero, %2, e16, m4, ta, ma\n\t"                              \
+      "vle16.v v0, (%1)\n\t"                                               \
+      ".4byte 0x4E049057\n\t"   /* vfconv.nvfp4.bf16.v v0, v0 */           \
+      "vse16.v v0, (%0)\n\t"                                               \
+      :: "r"(dst), "r"(src), "r"((size_t)(vl))                             \
+      : "memory", "v0", "v1", "v2", "v3");                                 \
 } while (0)
 
 /* Mo 8 step 4d-1: Reductions via static-inline helpers using intrinsics.
@@ -755,12 +899,10 @@ for (int_fast32_t h = 0; h < 8; h++) {
   for (int_fast32_t so2 = 0; so2 < ((seq_len) / (16)); so2++) {
     vfloat32m2_t S_reg2;
     vfloat32m2_t S_shifted;
-    vuint16m1_t S_bf16;
     vfloat32m2_t P_reg;
     S_reg2 = __riscv_vle32_v_f32m2(&S_fp32[16 * so2], (16));
     S_shifted = __riscv_vfsub_vf_f32m2(S_reg2, m_state[0], (16));
-    asm volatile ("vsetvli zero, %0, e16, m1, ta, ma" :: "r"((size_t)((16)))); S_bf16 = __riscv_vnsrl_wx_u16m1(__riscv_vreinterpret_v_f32m2_u32m2(S_shifted), 16, (16));
-    SATURN_VFEXP(&P_reg, &S_bf16, (16));
+    SATURN_VFEXP_F32M2(&P_reg, &S_shifted, (16));
     __riscv_vse32_v_f32m2(&P_fp32[16 * so2], P_reg, (16));
     l_state[0] = saturn_vfredusum_f32m2_helper(l_state[0], P_reg, (16));
   }
@@ -801,11 +943,6 @@ free(S_fp32);
 /* relying on the following instruction..."
 saturn_bf16_widen_f32_m2(dst,src,vl)
 asm volatile ("vsetvli zero, %0, e32, m2, ta, ma" :: "r"((size_t)({vl}))); {dst_data} = __riscv_vreinterpret_v_u32m2_f32m2(__riscv_vsll_vx_u32m2(__riscv_vzext_vf2_u32m2({src_data}, {vl}), 16, {vl}));
-*/
-
-/* relying on the following instruction..."
-saturn_f32_narrow_bf16_m2(dst,src,vl)
-asm volatile ("vsetvli zero, %0, e16, m1, ta, ma" :: "r"((size_t)({vl}))); {dst_data} = __riscv_vnsrl_wx_u16m1(__riscv_vreinterpret_v_f32m2_u32m2({src_data}), 16, {vl});
 */
 
 /* relying on the following instruction..."
@@ -864,6 +1001,6 @@ SATURN_VFCONV_NVFP4_BF16(&{dst_data}, &{src_data}, {vl});
 */
 
 /* relying on the following instruction..."
-vfexp_v(dst,src,vl)
-SATURN_VFEXP(&{dst_data}, &{src_data}, {vl});
+vfexp_f32_v(dst,src,vl)
+SATURN_VFEXP_F32M2(&{dst_data}, &{src_data}, {vl});
 */
