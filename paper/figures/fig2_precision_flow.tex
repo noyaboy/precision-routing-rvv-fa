@@ -1,0 +1,89 @@
+% Figure 2: Per-stage precision routing through the fused-FA kernel.
+%
+% TikZ source converted from the ASCII version in paper_draft.md §6.1.
+% Layout: top-to-bottom dataflow with the four Saturn FU lanes (blue)
+% as the precision-conversion gates between stages (gray).
+% Dtype annotations sit to the side of each arrow.
+%
+% Required packages (assumed loaded by the main paper):
+%   \usepackage{tikz}
+%   \usetikzlibrary{positioning,arrows.meta,calc}
+
+\begin{tikzpicture}[
+  font=\footnotesize\sffamily,
+  node distance=0.45cm and 0.6cm,
+  stage/.style={
+    draw, rounded corners=2pt, minimum width=3.6cm, minimum height=0.85cm,
+    align=center, fill=black!5
+  },
+  fu/.style={
+    draw, very thick, rounded corners=2pt, minimum width=3.6cm,
+    minimum height=0.85cm, align=center, fill=blue!8
+  },
+  redu/.style={
+    draw, rounded corners=2pt, minimum width=3.6cm, minimum height=0.85cm,
+    align=center, fill=orange!12
+  },
+  io/.style={
+    draw, rounded corners=2pt, minimum width=3.2cm, minimum height=0.7cm,
+    align=center, fill=green!10
+  },
+  arr/.style={-{Latex[length=2mm]}, thick},
+  lbl/.style={font=\scriptsize\itshape\sffamily, midway, right=2pt,
+              text=black!60, inner sep=1pt},
+]
+
+  % --- Phase 1: QK^T (top) ---
+  \node[io] (Qin) {Q (BF16, pre-widened to FP32 at init)};
+  \node[io, below=of Qin] (Kin) {K\_nvfp4 (+ E4M3 scale)};
+
+  \node[fu, below=of Kin] (vfconv_nb) {%
+    \textbf{vfconv.nvfp4.bf16.v}\\
+    + bf16$\rightarrow$fp32 widen + scale};
+
+  \node[stage, below=of vfconv_nb] (qkmacc) {%
+    \textbf{vfmacc} (Q$\cdot$K$^\top$) at FP32};
+
+  \node[stage, below=of qkmacc] (S) {S[seq\_len], FP32};
+
+  % --- Phase 2: Softmax ---
+  \node[redu, below=of S] (maxr) {max-reduce (\textbf{vfredmax.vs})};
+  \node[fu, below=of maxr] (vfexp) {\textbf{vfexp.v} (FP32 in/out)};
+  \node[redu, below=of vfexp] (sumr) {sum-reduce (\textbf{vfredusum.vs})};
+
+  % --- Phase 3: P-quant ---
+  \node[fu, below=of sumr] (vfconv_bf) {%
+    \textbf{vfconv.bf16.fp8.v} ($\times$ 448 pre-scale)};
+  \node[stage, below=of vfconv_bf] (Pfp8) {P\_fp8 (FP8-E4M3)};
+
+  % --- Phase 4: P*V ---
+  \node[io, below=of Pfp8] (Vin) {V\_nvfp4 (+ E4M3 scale)};
+  \node[fu, below=of Vin] (vfconv_fb) {%
+    \textbf{vfconv.fp8.bf16.v}\\
+    + bf16$\rightarrow$fp32 widen + scale};
+
+  \node[stage, below=of vfconv_fb] (pvmacc) {%
+    \textbf{vfmacc.vf} (P$\cdot$V) per-key scalar P};
+
+  \node[stage, below=of pvmacc] (Oacc) {O\_fp32 (acc), FP32 per-d};
+
+  % --- Final cast ---
+  \node[io, below=of Oacc] (Oout) {O[h, d] (BF16, final cast)};
+
+  % --- Arrows with side labels ---
+  \draw[arr] (Qin) -- (Kin) node[lbl] {[carry FP32]};
+  \draw[arr] (Kin) -- (vfconv_nb);
+  \draw[arr] (vfconv_nb) -- (qkmacc) node[lbl] {[FP32]};
+  \draw[arr] (qkmacc) -- (S);
+  \draw[arr] (S) -- (maxr);
+  \draw[arr] (maxr) -- (vfexp) node[lbl] {scalar max\_s};
+  \draw[arr] (vfexp) -- (sumr) node[lbl] {P\_fp32 [FP32]};
+  \draw[arr] (sumr) -- (vfconv_bf) node[lbl] {scalar 1/sum};
+  \draw[arr] (vfconv_bf) -- (Pfp8);
+  \draw[arr] (Pfp8) -- (Vin) node[lbl] {P\_fp8 scalar/key};
+  \draw[arr] (Vin) -- (vfconv_fb);
+  \draw[arr] (vfconv_fb) -- (pvmacc) node[lbl] {[FP32]};
+  \draw[arr] (pvmacc) -- (Oacc);
+  \draw[arr] (Oacc) -- (Oout) node[lbl] {$\times$ inv\_sum / 448};
+
+\end{tikzpicture}

@@ -1,0 +1,73 @@
+% Figure 3: Cycle counts per variant at each seq_len, normalized to
+% BF16 RVV as 1.00x.
+%
+% TikZ pgfplots source converted from the ASCII bar chart in
+% paper_draft.md §7.5. Data is the §6 fused-FA kernel cycle measurement
+% on gem5 RiscvO3CPU + DDR3-1600 + hd=64. Native FU is the best mixed
+% variant; the >=1.5x-faster-than-BF16 target is a horizontal line
+% drawn at y=1/1.5 ~= 0.667.
+%
+% Required packages (assumed loaded by the main paper):
+%   \usepackage{pgfplots}
+%   \pgfplotsset{compat=1.18}
+
+\begin{tikzpicture}
+\begin{axis}[
+  ybar,
+  bar width=4.5pt,
+  width=12.5cm,
+  height=6cm,
+  ymin=0, ymax=3.0,
+  ylabel={Cycles / BF16-RVV cycles},
+  ylabel style={font=\footnotesize\sffamily},
+  xlabel={seq\_len},
+  xlabel style={font=\footnotesize\sffamily},
+  symbolic x coords={2K, 4K, 8K, 16K},
+  xtick=data,
+  ytick={0.5, 1.0, 1.5, 2.0, 2.5, 3.0},
+  yticklabel style={font=\footnotesize\sffamily},
+  xticklabel style={font=\footnotesize\sffamily},
+  enlarge x limits=0.18,
+  legend style={
+    at={(0.5, -0.18)}, anchor=north, font=\scriptsize\sffamily,
+    legend columns=4, column sep=4pt
+  },
+  major grid style={line width=0.2pt, draw=gray!40},
+  ymajorgrids,
+  nodes near coords style={font=\tiny\sffamily, rotate=90, anchor=west,
+                           inner sep=1.2pt},
+  every axis plot/.append style={
+    fill opacity=0.85, draw=black, line width=0.25pt
+  },
+]
+
+% Cycle ratios (each variant / BF16 RVV) at each seq_len:
+%
+% seq_len    BF16 RVV   Native FU   Mixed stub  Mixed RVV proper
+%   2K       1.00       1.59        2.19        2.61
+%   4K       1.00       1.93        2.47        2.71
+%   8K       1.00       1.99        2.57        2.70
+%  16K       1.00       1.98        2.57        2.73
+
+\addplot+[fill=gray!50] coordinates {
+  (2K, 1.00) (4K, 1.00) (8K, 1.00) (16K, 1.00) };
+\addplot+[fill=blue!55, postaction={pattern=north east lines}] coordinates {
+  (2K, 1.59) (4K, 1.93) (8K, 1.99) (16K, 1.98) };
+\addplot+[fill=orange!60] coordinates {
+  (2K, 2.19) (4K, 2.47) (8K, 2.57) (16K, 2.57) };
+\addplot+[fill=red!55] coordinates {
+  (2K, 2.61) (4K, 2.71) (8K, 2.70) (16K, 2.73) };
+
+\legend{BF16 RVV (ref), Native FU, Mixed stub, Mixed RVV proper}
+
+% Horizontal reference lines:
+% * "BF16 ref"  at y=1.00
+% * ">=1.5x faster" target at y=1/1.5 = 0.667 (variant must be BELOW this to beat target)
+\draw[dashed, gray, thick] (axis cs:2K, 1.0) -- (axis cs:16K, 1.0);
+\node[font=\tiny\sffamily, anchor=south west, gray!80] at (axis cs:2K, 1.01) {BF16 ref (1.00$\times$)};
+
+\draw[dashed, red!70, thick] (axis cs:2K, 0.667) -- (axis cs:16K, 0.667);
+\node[font=\tiny\sffamily, anchor=south west, red!70] at (axis cs:2K, 0.68) {$\geq$1.5$\times$ target (0.667)};
+
+\end{axis}
+\end{tikzpicture}

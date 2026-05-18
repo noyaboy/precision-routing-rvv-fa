@@ -1,0 +1,6 @@
+# LaTeX build artifacts (regenerated from .tex sources)
+*.pdf
+*.log
+*.aux
+*.out
+*.synctex.gz

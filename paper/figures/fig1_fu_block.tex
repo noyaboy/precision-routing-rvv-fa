@@ -1,0 +1,79 @@
+% Figure 1: Precision-routing FU block diagram.
+%
+% TikZ source converted from the ASCII version in paper_draft.md §4.1.
+% Standalone: `pdflatex paper/figures/fig1_fu_block_standalone.tex`
+% Inline:     `\input{figures/fig1_fu_block.tex}` inside a `figure*` env.
+%
+% Required packages (assumed loaded by the main paper):
+%   \usepackage{tikz}
+%   \usetikzlibrary{positioning,fit,arrows.meta,calc}
+
+\begin{tikzpicture}[
+  font=\footnotesize\sffamily,
+  vrf/.style={
+    draw, rounded corners=2pt, minimum width=10.5cm, minimum height=0.6cm,
+    fill=black!5
+  },
+  lane/.style={
+    draw, rounded corners=2pt, minimum width=2.55cm, minimum height=1.55cm,
+    align=center, fill=white
+  },
+  exp/.style={
+    draw, rounded corners=2pt, minimum width=8.4cm, minimum height=1.6cm,
+    align=center, fill=white
+  },
+  fma/.style={
+    draw, dashed, rounded corners=2pt, minimum width=4cm, minimum height=0.55cm,
+    align=center, fill=black!3
+  },
+  outer/.style={
+    draw, rounded corners=3pt, inner sep=0.3cm, fill=none
+  },
+  arr/.style={-{Latex[length=2.2mm]}, thick},
+  darr/.style={-{Latex[length=2.2mm]}, dashed, thick},
+]
+
+  % Top VRF
+  \node[vrf] (vrf_in) at (0,0) {Saturn Vector Register File (VRF)};
+
+  % Conversion lanes row
+  \node[lane, below=0.85cm of vrf_in.south, xshift=-3.6cm] (conv_nb) {%
+    \textbf{vfconv}\\\texttt{.nvfp4.bf16}\\[1pt]
+    3 stages\\
+    K/V dequant\\
+    {\scriptsize(\S4.3)}};
+  \node[lane, right=0.25cm of conv_nb] (conv_bf) {%
+    \textbf{vfconv}\\\texttt{.bf16.fp8}\\[1pt]
+    2 stages\\
+    P-quant\\
+    {\scriptsize(\S4.4)}};
+  \node[lane, right=0.25cm of conv_bf] (conv_fb) {%
+    \textbf{vfconv}\\\texttt{.fp8.bf16}\\[1pt]
+    1 stage\\
+    P$\cdot$V dequant\\
+    {\scriptsize(\S4.5)}};
+
+  % vfexp row
+  \node[exp, below=0.55cm of conv_bf.south] (vfexp) {%
+    \textbf{vfexp.v} \quad {\scriptsize(softmax inner-loop, \S4.2)}\\[2pt]
+    10 stages:
+    BF16$\rightarrow$FP32 widen $\rightarrow$ range-reduce
+    $\rightarrow$ Q2.30 polynomial (5-stage Horner FMA)
+    $\rightarrow$ reconstruct $\rightarrow$ FP32};
+
+  % Optional FMA-share path
+  \node[fma, below=0.5cm of vfexp.south] (fma) {%
+    Saturn existing FP-FMA pipeline \quad{\scriptsize(optional FMA-share, \S4.7)}};
+
+  % Bottom VRF
+  \node[vrf, below=0.4cm of fma.south] (vrf_out) {Saturn Vector Register File (VRF)};
+
+  % Outer enclosure for the precision-routing FU
+  \node[outer, fit=(conv_nb)(conv_fb)(vfexp), label={[font=\footnotesize\bfseries\sffamily, anchor=north]north:Precision-Routing FU ($\times$16 lanes)}] (frame) {};
+
+  % Arrows
+  \draw[arr] (vrf_in.south) -- ($(frame.north)+(0,0.02)$);
+  \draw[darr] (vfexp.south) -- (fma.north);
+  \draw[arr] (fma.south) -- (vrf_out.north);
+
+\end{tikzpicture}

@@ -313,6 +313,12 @@ that collapses the polynomial multipliers in `vfexp.v` onto
 Saturn's existing FP-FMA pipeline (the 1.10 %-of-Saturn area
 configuration of §4.7).
 
+<!-- TikZ source: paper/figures/fig1_fu_block.tex
+     LaTeX inline: \input{figures/fig1_fu_block.tex}
+     Standalone preview: pdflatex paper/figures/fig1_fu_block_standalone.tex
+     The ASCII version below is retained as a reading aid; the TikZ file
+     is the authoritative artifact for camera-ready submission. -->
+
 ```
               Saturn Vector Register File (VRF)
                           │
@@ -729,6 +735,10 @@ the value is *carried* in at that point. Each stage selects its
 own dtype based on dynamic-range and accuracy tolerance (§3); the
 four custom FU lanes (boxed) translate at the precision boundaries.
 
+<!-- TikZ source: paper/figures/fig2_precision_flow.tex
+     LaTeX inline: \input{figures/fig2_precision_flow.tex}
+     ASCII version below retained as a reading aid. -->
+
 ```
            Q [BF16, pre-widened to FP32 at init]
               │
@@ -990,6 +1000,10 @@ BF16 RVV as 8 `█` blocks (1 `█` ≈ 0.125× of BF16 ratio).** The
 ≥1.5×-faster-than-BF16 target requires bars ≤ 5.3 blocks long (the
 "target" line drawn below); the BF16 reference is at 8 blocks (the
 "BF16 ref" line); all mixed variants extend well past both.
+
+<!-- TikZ source: paper/figures/fig3_cycle_bars.tex (requires pgfplots)
+     LaTeX inline: \input{figures/fig3_cycle_bars.tex}
+     ASCII version below retained as a reading aid. -->
 
 ```
               target       BF16 ref
