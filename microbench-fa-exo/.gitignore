@@ -1,0 +1,8 @@
+# Compiled binaries
+bench_fa_exo
+bench_fa_exo_l4k
+bench_fa_exo_l8k
+bench_fa_exo_l16k
+
+# gem5 output
+run/
