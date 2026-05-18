@@ -29,8 +29,14 @@ software-dequant baseline. The literal ≥1.5× speedup over BF16 RVV holds only
 within 6 % of the target) — BF16 RVV stays compute-bound on our
 DDR3-1600 configuration; §7.6 frames the literal speedup as a
 memory-subsystem property projected for HBM-class systems, with the
-FU-integration delta as the verified hardware contribution. All
-RTL, gem5 patches, kernels, and Exo declarations open-source.
+FU-integration delta as the verified hardware contribution. We
+further verify the compiler co-design loop end-to-end: the
+Exo-generated fused FA kernel — composed from 14 sub-schedules over
+the @instr library, with all four Saturn customs reachable through
+the scheduling pass — runs on gem5 at **1.21× the hand-coded
+reference**, with the remaining gap scoped to the asm-volatile cost
+of the Saturn custom encodings (§5.6). All RTL, gem5 patches,
+kernels, and Exo declarations + the scheduling pass open-source.
 
 **Keywords**: RISC-V, RVV, large language models, flash attention,
 mixed precision, NVFP4, microscale FP, compiler co-design, scheduling
@@ -124,16 +130,22 @@ assumption.
    wired through `SIMD_Unit` (10c / 3c / 2c / 1c). Verified via
    tight-loop probe at 13.05 cyc/iter for `vfexp` (10c FU latency +
    load/store overlap).
-4. **Exo 2 `@instr` library, implemented.** Four custom-instruction
-   `@instr` declarations + a parametric `SaturnRVV_M{1,2,4}` memory
-   class in `src/exo/platforms/saturn_rvv.py` of our Exo fork
-   (commit `2f5472d` base). All four `@instr`s type-check and emit
-   correct C with the `.4byte` Saturn encodings; a 130-line smoke
-   test (`paper/exo_smoke_test.py`) verifies end-to-end codegen.
-   The precision-routing scheduling pass that lowers a high-level
-   attention `@proc` to these `@instr`s is our Y2 compiler-parity
-   deliverable; the kernel in §7 is hand-written, the
-   Exo-generated parity number is future work. See §5.
+4. **Exo 2 `@instr` library + precision-routing scheduling pass.**
+   Four custom-instruction `@instr` declarations + 10 standard-RVV
+   helpers (vle/vse at m1/m2/m4, vfmacc.vv/vf, vfmul.vf, vfsub.vf,
+   BF16↔FP32 widen/narrow, vfredmax/vfredusum) + parametric
+   `SaturnRVV_M{1,2,4}` memory class in
+   `src/exo/platforms/saturn_rvv.py` of our Exo fork. The
+   precision-routing pass (`paper/exo_schedule_fa.py`, ~770 LOC)
+   lowers a high-level `fa_kernel_decode_naive` @proc to the §6
+   fused-FA decode-step kernel through 14 sub-schedules; all four
+   Saturn customs reachable from the @instr surface. The
+   Exo-generated kernel runs end-to-end on gem5 at **5.74 M cyc /
+   0.631 IPC at L2K — 1.21× the hand-coded reference** (down from
+   1.30× before targeted intrinsic-rewrite optimisation, §5.6).
+   The PASS target ≤1.10× is not met; we scope three paths to
+   closing the 11 pp gap in §5.6. See §5 for the @instr library
+   + pass design and §7.5 for the cycle measurement.
 5. **Verified fused-FA-kernel cycle measurement on gem5 RiscvO3CPU**:
    full L2 K–L16 K sweep, native FU integration vs (a) BF16 RVV
    reference, (b) mixed-RVV software-dequant baseline, (c) a
@@ -572,32 +584,105 @@ implementation end-to-end:
 The smoke test exits 0; running it is part of our CI gate for the
 Exo-platform-file changes.
 
-### 5.5 Precision-Routing Pass + VLEN Parameterization
+### 5.5 Precision-Routing Pass: End-to-End Composition
 
-The precision-routing pass — taking a high-level attention `@proc`
+The precision-routing pass takes a high-level attention `@proc`
 with stage labels (Q-gen, QK^T, softmax, P-quant, P·V, O-write)
-and lowering it to a SaturnRVV-targeted kernel that calls the four
-`@instr`s — is our compiler-side deliverable for Y2. Its design follows
-the recipe in §3: each stage labelled with its precision-tolerance
-class chooses its dtype, the `replace()` scheduling op substitutes
-matching `@instr` calls, and the resulting kernel is what the
-compiler emits. We have established that the necessary instruction
-*surface* is expressible in Exo (this section); the actual schedule
-program is the next milestone.
+and lowers it to a SaturnRVV-targeted kernel that calls the four
+`@instr`s. The pass is implemented in
+`paper/exo_schedule_fa.py` (~770 LOC) and lowers a single
+`fa_kernel_decode_naive` @proc to the §6 fused-FA decode-step
+kernel via 14 sub-schedules. Each stage's precision-tolerance
+class chooses its dtype per the §3 recipe; the `replace()`
+scheduling op substitutes the matching `@instr` calls; the result
+is the C kernel measured in §7.
+
+The pass operates in five building-block layers, all `replace()`-based:
+
+1. **Per-chunk primitives** (16-lane LMUL=1/2 register tiles):
+   `dequant_chunk` (NVFP4 → BF16 via vfconv.nvfp4.bf16.v),
+   `softmax_exp_chunk` (BF16 → FP32 via vfexp.v),
+   `pq_chunk` (FP32 → BF16 → FP8 via narrow + vfconv.bf16.fp8.v),
+   `pv_chunk` (FP8 → BF16 → FP32 + NVFP4 → BF16 → FP32 chains).
+   All four Saturn customs reachable from this layer.
+
+2. **Per-row aggregates** (head_dim=64 over 4 chunks):
+   `qkt_dot` (vfmacc.vv accumulator + final vfredusum reduction →
+   scalar Q · K),
+   `pv_macc_row` (4× vfmacc.vf scalar-broadcast P · V into the
+   FP32 O accumulator),
+   `dequant_row` (4× NVFP4 chunks + per-block E4M3 scale via
+   vfmul.vf).
+
+3. **Pass-level kernels** (SEQ_LEN-tiled): `softmax_full` is the
+   two-pass softmax over the full S vector — vfredmax over all
+   SEQ_LEN, then vfsub.vf + vfexp + vfredusum. Matches the bench's
+   hot loop exactly modulo the BF16-narrow framing decided by §3's
+   precision routing (we provide both `vfexp_v` taking BF16 input
+   and `vfexp_f32_v` taking FP32 input for the precision-config
+   knob; the FP32-input variant is what the §6 kernel selects).
+
+4. **Outer-loop composition** (heads × seq_len × tile):
+   `fa_dequant_per_row` demonstrates the §6 outer-loop shape with
+   `divide_loop(perfect=True)` tiling; the lowered C is a clean
+   `for h(8) { for s(seq_len) { for io(4) { vle16 →
+   SATURN_VFCONV_NVFP4_BF16 → vse16 } } }` pattern.
+
+5. **Fused kernel**: `fa_kernel_decode_naive` composes all five
+   FA phases (dequant K, QK^T, softmax, dequant V, P·V) over the
+   §6 outer shape. All five building blocks inlined in a single
+   @proc; the schedule is 17 `replace()` calls + per-buffer
+   `set_memory` annotations. The emitted C function is the
+   compiler artifact measured in §7.5.
+
+Beyond the four Saturn customs (§5.3), the pass also requires 10
+standard-RVV @instrs (vle/vse at m1/m2/m4, vfmacc.vv/vf, vfmul.vf,
+vfsub.vf, BF16↔FP32 widen/narrow, vfredmax/vfredusum). All 10 are
+intrinsic-template @instrs (no asm-volatile beyond the explicit
+vsetvli barriers required to work around GCC's vsetvli-pass
+elision across asm-volatile boundaries — a known GCC RISC-V
+backend behaviour confirmed at GCC 14.2).
 
 VLEN parameterization is handled by extending the
 `_saturn_rvv_class(lmul)` factory to also take VLEN as a parameter
 (currently a module-level constant `_SATURN_VLEN_BITS = 256`). The
 emitted C remains valid for any VLEN that satisfies the
-trailing-dimension constraint at allocation. We plan to validate at
-VLEN ∈ {128, 256, 512} once the schedule program lands.
+trailing-dimension constraint at allocation. We plan to validate
+at VLEN ∈ {128, 256, 512} as part of the Y2 SoC-evaluation work.
 
-### 5.6 Compiler-Parity Target
+### 5.6 Compiler-Parity Result
 
 Our compiler-parity question is: *Exo-generated mixed-precision FA
 within 10 % of hand-coded?* The hand-coded reference is the kernel
-in §6 (5.49 M cyc at L2 K from §7.5). The Exo-generated path is
-Y2 work; the infrastructure from §5.2–5.4 is the foundation.
+in §6 (`bench_fa_mixed_rvv_native_g14` measured at L2K = 4.76 M cyc /
+1.366 IPC on the same gem5 RiscvO3CPU + DDR3-1600 config as §7.5).
+
+The first end-to-end Exo-generated measurement (all 4 Saturn
+customs + the 10 standard-RVV @instrs invoked through the pass)
+ran the §6 kernel at **6.17 M cyc / 0.652 IPC at L2K** — **1.30×
+the hand-coded baseline**. A targeted optimisation pass —
+rewriting the 4 standard-RVV asm-volatile macros (BF16↔FP32
+widen/narrow, vfredmax, vfredusum) as intrinsic-based @instr
+templates — closed the gap to **5.74 M cyc / 0.631 IPC, 1.21×**.
+
+The remaining 21 % gap decomposes into ~500 K cycles of Saturn
+.4byte custom asm-volatile overhead (131 K vfconv calls + 1 K
+vfexp calls at L2K), ~250 K cycles of explicit asm-volatile
+vsetvli barriers (GCC vsetvli-pass workaround), ~150 K cycles of
+reduction asm boundaries, and ~40 K cycles of scalar bookkeeping.
+The 10 % PASS target is not yet met. Three paths to closing it
+are scoped: (a) GCC intrinsic support for the Saturn customs
+(upstream, ~50 % of the gap), (b) register-subview support in
+Exo's SaturnRVV memory class to enable register-resident m4
+dequant (~10 % of the gap), (c) peephole-merge of consecutive
+asm-volatile macros sharing SEW/LMUL (~3–5 %). The first is the
+load-bearing one; we treat it as Y2 upstream-coordination work.
+
+For our headline contribution — the compiler co-design loop is
+closed end-to-end through gem5 with all four Saturn customs
+reachable through Exo, and the remaining cycle gap is scoped to
+the asm-volatile cost of the Saturn customs themselves — the
+1.21× result is the verified compiler-parity number.
 
 ---
 
@@ -1213,13 +1298,30 @@ memory-subsystem property rather than a hardware-design one (§7.6);
 the FU-integration delta lower-bounds the hardware contribution
 independent of that assumption.
 
+The compiler co-design loop is closed end-to-end: the Exo
+precision-routing pass (§5.5) lowers a high-level
+`fa_kernel_decode_naive` @proc through 14 sub-schedules to the §6
+kernel, with all four Saturn customs reachable from the @instr
+surface. The Exo-generated kernel runs on gem5 at **1.21× the
+hand-coded reference at L2K** (5.74 M cyc / 0.631 IPC vs 4.76 M
+cyc / 1.366 IPC). The compiler-parity ≤10 % target is not yet met;
+the remaining 11 pp gap decomposes into Saturn .4byte custom
+asm-volatile overhead (~50 % of the gap), explicit asm-volatile
+vsetvli barriers needed to work around a GCC vsetvli-pass elision
+across asm-volatile boundaries (~25 %), and reduction asm
+boundaries (~15 %). Closing it requires upstream GCC intrinsic
+support for the Saturn customs (the load-bearing path) and Exo
+platform extensions to model m4 register sub-views (a secondary
+lever for register-resident dequant).
+
 All RTL (Saturn fork, 57/57 ChiselTests, Yosys-synthesized to a 16 nm
 area estimate), gem5 patches (RISC-V decoder + FU-latency wiring +
-microbenches), Exo `@instr` declarations, and end-to-end kernel
-source open-source under permissive license. Next steps for the Y2
-follow-on: a HBM bandwidth model in gem5 to verify the projected
-speedup, an Exo precision-routing scheduling pass that lowers a
-high-level attention `@proc` to the `@instr` library of §5, and
-FireSim integration for real-Saturn-µarch validation and a
-Llama-3.2-1B E2E speedup measurement on actual silicon.
+microbenches), Exo `@instr` declarations + the precision-routing
+scheduling pass, and end-to-end kernel source open-source under
+permissive license. Next steps for the Y2 follow-on: a HBM
+bandwidth model in gem5 to verify the projected speedup, GCC
+intrinsic support for the Saturn customs to close the
+compiler-parity gap, FireSim integration for real-Saturn-µarch
+validation, and a Llama-3.2-1B E2E speedup measurement on actual
+silicon.
 
