@@ -235,50 +235,79 @@ identical miscompile as Part 1.
 
 ## Minimal reproducer (Part 2)
 
+**Important**: this reproducer triggers the bug only when the
+widening chain is inside a loop (the production case). The
+straight-line, single-function-body form gets the correct vsetvli
+emitted by GCC 14.2's local liveness analysis. The bug is
+specifically that the *loop-hoisted* unified vtype gets clobbered
+by the asm-volatile inside the loop body, but the demand-set pass
+fails to re-emit a vsetvli per iteration. Verified 2026-05-18
+with `riscv64-linux-gcc.br_real (Buildroot 2021.11-12449-g1bef613319) 14.2.0`.
+
 ```c
 #include <riscv_vector.h>
 #include <stdint.h>
 
-/* Stand-in for the Saturn custom: any asm-volatile that changes
- * vtype internally and doesn't declare it clobbered. The
- * .4byte is a Saturn custom encoding, but the bug reproduces
- * with any asm-volatile that runs a `vsetvli` to a different
- * SEW/LMUL inside. */
-#define ASM_INNER_VSETVLI(dst, src, vl) do {                       \
+/* Stand-in for a Saturn custom: opaque .4byte inside asm-volatile
+ * that internally changes vtype to e16, m1. The .4byte 0x4E049057
+ * is the real Saturn vfconv.nvfp4.bf16.v encoding; whether the
+ * opcode is real is irrelevant — GCC sees only the bits. */
+#define SATURN_VFCONV_M1(dst, src, vl) do {                        \
     asm volatile (                                                 \
       "vsetvli zero, %2, e16, m1, ta, ma\n\t"                      \
       "vle16.v v0, (%1)\n\t"                                       \
+      ".4byte 0x4E049057\n\t"                                      \
       "vse16.v v0, (%0)\n\t"                                       \
       :: "r"(dst), "r"(src), "r"((size_t)(vl))                     \
       : "memory", "v0");                                           \
 } while (0)
 
-void widen_after_asm(const uint16_t *src,
-                     uint16_t       *bf16_stash,
-                     uint32_t       *dst,
-                     size_t          vl) {
-    ASM_INNER_VSETVLI(bf16_stash, src, vl);    /* leaves vtype = e16, m1 */
-    vuint16m1_t a = __riscv_vle16_v_u16m1(bf16_stash, vl);
-    vuint32m2_t b = __riscv_vzext_vf2_u32m2(a, vl);    /* needs e32, m2 */
-    __riscv_vse32_v_u32m2(dst, b, vl);
+void widen_loop(const uint16_t *src_packed,
+                uint16_t       *bf16_stash,
+                float          *dst_f32,
+                size_t          n_iters,
+                size_t          vl) {
+    for (size_t i = 0; i < n_iters; i++) {
+        SATURN_VFCONV_M1(bf16_stash, src_packed + i*16, vl);
+        /* widening chain that needs e32, m2: */
+        vuint16m1_t a    = __riscv_vle16_v_u16m1(bf16_stash, vl);
+        vuint32m2_t aw   = __riscv_vzext_vf2_u32m2(a, vl);
+        vuint32m2_t shl  = __riscv_vsll_vx_u32m2(aw, 16, vl);
+        vfloat32m2_t bf  = __riscv_vreinterpret_v_u32m2_f32m2(shl);
+        __riscv_vse32_v_f32m2(dst_f32 + i*16, bf, vl);
+    }
 }
 ```
 
 ## Output: GCC 14.2 at `-O2` (BUG)
 
 ```asm
-widen_after_asm:
-    vsetvli zero, a3, e16, m1, ta, ma       # from the asm-volatile
+widen_loop:
+    beqz    a3, .L8
+    li      a5, 0
+    vsetvli zero, a4, e32, m2, ta, ma       # hoisted OUTSIDE loop
+.L3:
+    vsetvli zero, a4, e16, m1, ta, ma       # asm-volatile body — clobbers vtype
     vle16.v v0, (a0)
+    .4byte  0x4E049057
     vse16.v v0, (a1)
-    ; <-- NO vsetvli emitted here despite vzext.vf2 needing e32, m2 -->
-    vle16.v v1, (a1)                        # EEW=16 baked in (correct)
-    vzext.vf2 v2, v1                        # at SEW=16, source EEW=8 (BUG)
-    vse32.v v2, (a2)
+    vle16.v v1, (a1)                        # EEW=16 baked in (OK)
+    addi    a5, a5, 1
+    addi    a0, a0, 32
+    vzext.vf2 v2, v1                        # runs at e16, m1 (BUG: needs e32, m2)
+    vsll.vi   v2, v2, 16
+    vse32.v   v2, (a2)
+    addi    a2, a2, 64
+    bne     a3, a5, .L3
+.L8:
+    ret
 ```
 
-The vzext.vf2 again reads the wrong-width source — identical
-end-state miscompile as Part 1 of this report.
+The vsetvli on entry sets `e32, m2` once outside the loop. Inside,
+the asm-volatile's `vsetvli ... e16, m1` clobbers it every iteration,
+and the demand-set pass never re-emits a fresh `vsetvli zero, ..., e32, m2`
+before the `vzext.vf2`. Result: vzext.vf2 reads source EEW=8 instead
+of EEW=16 — identical end-state miscompile as Part 1 of this report.
 
 ## Workarounds tested
 
