@@ -1266,14 +1266,14 @@ if __name__ == "__main__":
         "h = 0; h < 8",                   # heads outer loop
         "s = 0; s < seq_len",             # seq_len middle loop (`size` param)
         # qkt_chunk (Mo 8 step 2b: QK^T inner-product with dequant chain)
-        "SATURN_BF16_WIDEN_F32",          # saturn_bf16_widen_f32_m2 macro
+        "__riscv_vzext_vf2_u32m2",        # saturn_bf16_widen_f32_m2 (step 4d-1: intrinsic chain)
         "__riscv_vfmacc_vv_f32m2",        # saturn_vfmacc_vv_f32m2 intrinsic
         "__riscv_vle32_v_f32m2",          # saturn_vle32_m2 (Q + S_acc loads)
         # online_softmax_chunk (Mo 8 step 2c: intra-tile online softmax)
-        "SATURN_VFREDMAX_F32M2",          # saturn_vfredmax_to_dram_f32m2 macro
+        "saturn_vfredmax_f32m2_helper",   # saturn_vfredmax_to_dram_f32m2 (step 4d-1: inline helper)
         "__riscv_vfsub_vf_f32m2",         # saturn_vfsub_vf_f32m2 intrinsic
-        "SATURN_F32_NARROW_BF16",         # saturn_f32_narrow_bf16_m2 macro
-        "SATURN_VFREDUSUM_F32M2",         # saturn_vfredusum_to_dram_f32m2 macro
+        "__riscv_vnsrl_wx_u16m1",         # saturn_f32_narrow_bf16_m2 (step 4d-1: intrinsic chain)
+        "saturn_vfredusum_f32m2_helper",  # saturn_vfredusum_to_dram_f32m2 (step 4d-1: inline helper)
         # pq_chunk (Mo 8 step 3: post-softmax P-quant FP32 -> BF16 -> FP8)
         "SATURN_VFCONV_BF16_FP8",         # vfconv_bf16_fp8_v macro
         "__riscv_vse8_v_u8m1",            # saturn_vse8_m1 store

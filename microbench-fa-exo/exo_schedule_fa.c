@@ -58,64 +58,33 @@
       : "memory", "v0");                                                   \
 } while (0)
 
-/* Widen BF16 (ui16 carrier) -> FP32 via vzext.vf2 + vsll.vi 16.
- * This is the gem5-compatible widen path used in
- * bench_fa_mixed_rvv_native.c: gem5 25.1.0.1 SE mode lacks Zvfbfwma
- * and Zvfbfmin, so vfwcvtbf16.f.f.v isn't available; instead we
- * zero-extend each ui16 lane to ui32 and shift the BF16 bits into
- * the FP32 sign+exp+mantissa-upper-7 positions (BF16 == upper 16
- * bits of FP32). Input: 16 BF16 at LMUL=1; output: 16 FP32 at
- * LMUL=2. */
-#define SATURN_BF16_WIDEN_F32(dst, src, vl) do {                           \
-    asm volatile (                                                         \
-      "vsetvli zero, %2, e16, m1, ta, ma\n\t"                              \
-      "vle16.v v8, (%1)\n\t"                                               \
-      "vsetvli zero, %2, e32, m2, ta, ma\n\t"                              \
-      "vzext.vf2 v10, v8\n\t"                                              \
-      "vsll.vi v10, v10, 16\n\t"                                           \
-      "vse32.v v10, (%0)\n\t"                                              \
-      :: "r"(dst), "r"(src), "r"((size_t)(vl))                             \
-      : "memory", "v8", "v9", "v10", "v11");                               \
-} while (0)
+/* Mo 8 step 4d-1: Reductions via static-inline helpers using intrinsics.
+ *
+ * The previous variant declared these as `do { ... } while (0)` macros.
+ * Static inline functions let GCC inline + schedule them across
+ * surrounding code without the macro's potential scope inhibitions; the
+ * critical property is that NO asm-volatile is involved, so the OoO
+ * core can overlap reductions with adjacent ops.
+ *
+ * Used by saturn_vfredmax_to_dram_f32m2 / saturn_vfredusum_to_dram_f32m2.
+ * The BF16<->FP32 widen + narrow are no longer macros: their @instr
+ * templates emit the intrinsic chain inline at the call site. */
 
-/* Truncating narrow FP32 -> BF16 via vnsrl.wi 16. Same gem5-compat
- * reason as the widen (no Zvfbfmin). Each FP32 element's upper 16
- * bits (sign + exp + mantissa[22:16]) become the BF16 element; lower
- * 16 bits of mantissa are dropped (truncate, not round). LMUL halves:
- * 16 FP32 (M2) in -> 16 BF16 (M1) out. */
-#define SATURN_F32_NARROW_BF16(dst, src, vl) do {                          \
-    asm volatile (                                                         \
-      "vsetvli zero, %2, e32, m2, ta, ma\n\t"                              \
-      "vle32.v v4, (%1)\n\t"                                               \
-      "vsetvli zero, %2, e16, m1, ta, ma\n\t"                              \
-      "vnsrl.wi v8, v4, 16\n\t"                                            \
-      "vse16.v v8, (%0)\n\t"                                               \
-      :: "r"(dst), "r"(src), "r"((size_t)(vl))                             \
-      : "memory", "v4", "v5", "v8");                                       \
-} while (0)
+static inline float saturn_vfredmax_f32m2_helper(float init,
+                                                 vfloat32m2_t src,
+                                                 size_t vl) {
+    vfloat32m1_t acc = __riscv_vfmv_v_f_f32m1(init, 1);
+    acc = __riscv_vfredmax_vs_f32m2_f32m1(src, acc, vl);
+    return __riscv_vfmv_f_s_f32m1_f32(acc);
+}
 
-/* Reduce FP32 vector to scalar max into a DRAM-resident f32. Bounces
- * the scalar through an m1 register via vfmv.v.f init + vfredmax.vs
- * + vfmv.f.s extract. The DRAM-scalar surface keeps the @instr
- * signature uniform with the rest of the platform; step 4
- * (cycle-parity work) can replace this with a more granular variant
- * that holds the scalar in a SaturnRVV register. */
-#define SATURN_VFREDMAX_F32M2(dst_scalar, src, vl) do {                    \
-    vfloat32m1_t _acc = __riscv_vfmv_v_f_f32m1((dst_scalar), 1);           \
-    _acc = __riscv_vfredmax_vs_f32m2_f32m1((src), _acc, (vl));             \
-    (dst_scalar) = __riscv_vfmv_f_s_f32m1_f32(_acc);                       \
-} while (0)
-
-/* Reduce FP32 vector to scalar sum (unordered) into a DRAM-resident
- * f32. Same bouncing pattern as the max-reduce above. Unordered
- * variant (vfredusum) over ordered (vfredsum) because softmax sums
- * already absorb FP rounding; unordered is faster and the result
- * difference is below softmax's numerical tolerance. */
-#define SATURN_VFREDUSUM_F32M2(dst_scalar, src, vl) do {                   \
-    vfloat32m1_t _acc = __riscv_vfmv_v_f_f32m1((dst_scalar), 1);           \
-    _acc = __riscv_vfredusum_vs_f32m2_f32m1((src), _acc, (vl));            \
-    (dst_scalar) = __riscv_vfmv_f_s_f32m1_f32(_acc);                       \
-} while (0)
+static inline float saturn_vfredusum_f32m2_helper(float init,
+                                                  vfloat32m2_t src,
+                                                  size_t vl) {
+    vfloat32m1_t acc = __riscv_vfmv_v_f_f32m1(init, 1);
+    acc = __riscv_vfredusum_vs_f32m2_f32m1(src, acc, vl);
+    return __riscv_vfmv_f_s_f32m1_f32(acc);
+}
 
 #endif /* SATURN_CUSTOM_ASM_H */
 
@@ -176,64 +145,33 @@
       : "memory", "v0");                                                   \
 } while (0)
 
-/* Widen BF16 (ui16 carrier) -> FP32 via vzext.vf2 + vsll.vi 16.
- * This is the gem5-compatible widen path used in
- * bench_fa_mixed_rvv_native.c: gem5 25.1.0.1 SE mode lacks Zvfbfwma
- * and Zvfbfmin, so vfwcvtbf16.f.f.v isn't available; instead we
- * zero-extend each ui16 lane to ui32 and shift the BF16 bits into
- * the FP32 sign+exp+mantissa-upper-7 positions (BF16 == upper 16
- * bits of FP32). Input: 16 BF16 at LMUL=1; output: 16 FP32 at
- * LMUL=2. */
-#define SATURN_BF16_WIDEN_F32(dst, src, vl) do {                           \
-    asm volatile (                                                         \
-      "vsetvli zero, %2, e16, m1, ta, ma\n\t"                              \
-      "vle16.v v8, (%1)\n\t"                                               \
-      "vsetvli zero, %2, e32, m2, ta, ma\n\t"                              \
-      "vzext.vf2 v10, v8\n\t"                                              \
-      "vsll.vi v10, v10, 16\n\t"                                           \
-      "vse32.v v10, (%0)\n\t"                                              \
-      :: "r"(dst), "r"(src), "r"((size_t)(vl))                             \
-      : "memory", "v8", "v9", "v10", "v11");                               \
-} while (0)
+/* Mo 8 step 4d-1: Reductions via static-inline helpers using intrinsics.
+ *
+ * The previous variant declared these as `do { ... } while (0)` macros.
+ * Static inline functions let GCC inline + schedule them across
+ * surrounding code without the macro's potential scope inhibitions; the
+ * critical property is that NO asm-volatile is involved, so the OoO
+ * core can overlap reductions with adjacent ops.
+ *
+ * Used by saturn_vfredmax_to_dram_f32m2 / saturn_vfredusum_to_dram_f32m2.
+ * The BF16<->FP32 widen + narrow are no longer macros: their @instr
+ * templates emit the intrinsic chain inline at the call site. */
 
-/* Truncating narrow FP32 -> BF16 via vnsrl.wi 16. Same gem5-compat
- * reason as the widen (no Zvfbfmin). Each FP32 element's upper 16
- * bits (sign + exp + mantissa[22:16]) become the BF16 element; lower
- * 16 bits of mantissa are dropped (truncate, not round). LMUL halves:
- * 16 FP32 (M2) in -> 16 BF16 (M1) out. */
-#define SATURN_F32_NARROW_BF16(dst, src, vl) do {                          \
-    asm volatile (                                                         \
-      "vsetvli zero, %2, e32, m2, ta, ma\n\t"                              \
-      "vle32.v v4, (%1)\n\t"                                               \
-      "vsetvli zero, %2, e16, m1, ta, ma\n\t"                              \
-      "vnsrl.wi v8, v4, 16\n\t"                                            \
-      "vse16.v v8, (%0)\n\t"                                               \
-      :: "r"(dst), "r"(src), "r"((size_t)(vl))                             \
-      : "memory", "v4", "v5", "v8");                                       \
-} while (0)
+static inline float saturn_vfredmax_f32m2_helper(float init,
+                                                 vfloat32m2_t src,
+                                                 size_t vl) {
+    vfloat32m1_t acc = __riscv_vfmv_v_f_f32m1(init, 1);
+    acc = __riscv_vfredmax_vs_f32m2_f32m1(src, acc, vl);
+    return __riscv_vfmv_f_s_f32m1_f32(acc);
+}
 
-/* Reduce FP32 vector to scalar max into a DRAM-resident f32. Bounces
- * the scalar through an m1 register via vfmv.v.f init + vfredmax.vs
- * + vfmv.f.s extract. The DRAM-scalar surface keeps the @instr
- * signature uniform with the rest of the platform; step 4
- * (cycle-parity work) can replace this with a more granular variant
- * that holds the scalar in a SaturnRVV register. */
-#define SATURN_VFREDMAX_F32M2(dst_scalar, src, vl) do {                    \
-    vfloat32m1_t _acc = __riscv_vfmv_v_f_f32m1((dst_scalar), 1);           \
-    _acc = __riscv_vfredmax_vs_f32m2_f32m1((src), _acc, (vl));             \
-    (dst_scalar) = __riscv_vfmv_f_s_f32m1_f32(_acc);                       \
-} while (0)
-
-/* Reduce FP32 vector to scalar sum (unordered) into a DRAM-resident
- * f32. Same bouncing pattern as the max-reduce above. Unordered
- * variant (vfredusum) over ordered (vfredsum) because softmax sums
- * already absorb FP rounding; unordered is faster and the result
- * difference is below softmax's numerical tolerance. */
-#define SATURN_VFREDUSUM_F32M2(dst_scalar, src, vl) do {                   \
-    vfloat32m1_t _acc = __riscv_vfmv_v_f_f32m1((dst_scalar), 1);           \
-    _acc = __riscv_vfredusum_vs_f32m2_f32m1((src), _acc, (vl));            \
-    (dst_scalar) = __riscv_vfmv_f_s_f32m1_f32(_acc);                       \
-} while (0)
+static inline float saturn_vfredusum_f32m2_helper(float init,
+                                                  vfloat32m2_t src,
+                                                  size_t vl) {
+    vfloat32m1_t acc = __riscv_vfmv_v_f_f32m1(init, 1);
+    acc = __riscv_vfredusum_vs_f32m2_f32m1(src, acc, vl);
+    return __riscv_vfmv_f_s_f32m1_f32(acc);
+}
 
 #endif /* SATURN_CUSTOM_ASM_H */
 
@@ -294,64 +232,33 @@
       : "memory", "v0");                                                   \
 } while (0)
 
-/* Widen BF16 (ui16 carrier) -> FP32 via vzext.vf2 + vsll.vi 16.
- * This is the gem5-compatible widen path used in
- * bench_fa_mixed_rvv_native.c: gem5 25.1.0.1 SE mode lacks Zvfbfwma
- * and Zvfbfmin, so vfwcvtbf16.f.f.v isn't available; instead we
- * zero-extend each ui16 lane to ui32 and shift the BF16 bits into
- * the FP32 sign+exp+mantissa-upper-7 positions (BF16 == upper 16
- * bits of FP32). Input: 16 BF16 at LMUL=1; output: 16 FP32 at
- * LMUL=2. */
-#define SATURN_BF16_WIDEN_F32(dst, src, vl) do {                           \
-    asm volatile (                                                         \
-      "vsetvli zero, %2, e16, m1, ta, ma\n\t"                              \
-      "vle16.v v8, (%1)\n\t"                                               \
-      "vsetvli zero, %2, e32, m2, ta, ma\n\t"                              \
-      "vzext.vf2 v10, v8\n\t"                                              \
-      "vsll.vi v10, v10, 16\n\t"                                           \
-      "vse32.v v10, (%0)\n\t"                                              \
-      :: "r"(dst), "r"(src), "r"((size_t)(vl))                             \
-      : "memory", "v8", "v9", "v10", "v11");                               \
-} while (0)
+/* Mo 8 step 4d-1: Reductions via static-inline helpers using intrinsics.
+ *
+ * The previous variant declared these as `do { ... } while (0)` macros.
+ * Static inline functions let GCC inline + schedule them across
+ * surrounding code without the macro's potential scope inhibitions; the
+ * critical property is that NO asm-volatile is involved, so the OoO
+ * core can overlap reductions with adjacent ops.
+ *
+ * Used by saturn_vfredmax_to_dram_f32m2 / saturn_vfredusum_to_dram_f32m2.
+ * The BF16<->FP32 widen + narrow are no longer macros: their @instr
+ * templates emit the intrinsic chain inline at the call site. */
 
-/* Truncating narrow FP32 -> BF16 via vnsrl.wi 16. Same gem5-compat
- * reason as the widen (no Zvfbfmin). Each FP32 element's upper 16
- * bits (sign + exp + mantissa[22:16]) become the BF16 element; lower
- * 16 bits of mantissa are dropped (truncate, not round). LMUL halves:
- * 16 FP32 (M2) in -> 16 BF16 (M1) out. */
-#define SATURN_F32_NARROW_BF16(dst, src, vl) do {                          \
-    asm volatile (                                                         \
-      "vsetvli zero, %2, e32, m2, ta, ma\n\t"                              \
-      "vle32.v v4, (%1)\n\t"                                               \
-      "vsetvli zero, %2, e16, m1, ta, ma\n\t"                              \
-      "vnsrl.wi v8, v4, 16\n\t"                                            \
-      "vse16.v v8, (%0)\n\t"                                               \
-      :: "r"(dst), "r"(src), "r"((size_t)(vl))                             \
-      : "memory", "v4", "v5", "v8");                                       \
-} while (0)
+static inline float saturn_vfredmax_f32m2_helper(float init,
+                                                 vfloat32m2_t src,
+                                                 size_t vl) {
+    vfloat32m1_t acc = __riscv_vfmv_v_f_f32m1(init, 1);
+    acc = __riscv_vfredmax_vs_f32m2_f32m1(src, acc, vl);
+    return __riscv_vfmv_f_s_f32m1_f32(acc);
+}
 
-/* Reduce FP32 vector to scalar max into a DRAM-resident f32. Bounces
- * the scalar through an m1 register via vfmv.v.f init + vfredmax.vs
- * + vfmv.f.s extract. The DRAM-scalar surface keeps the @instr
- * signature uniform with the rest of the platform; step 4
- * (cycle-parity work) can replace this with a more granular variant
- * that holds the scalar in a SaturnRVV register. */
-#define SATURN_VFREDMAX_F32M2(dst_scalar, src, vl) do {                    \
-    vfloat32m1_t _acc = __riscv_vfmv_v_f_f32m1((dst_scalar), 1);           \
-    _acc = __riscv_vfredmax_vs_f32m2_f32m1((src), _acc, (vl));             \
-    (dst_scalar) = __riscv_vfmv_f_s_f32m1_f32(_acc);                       \
-} while (0)
-
-/* Reduce FP32 vector to scalar sum (unordered) into a DRAM-resident
- * f32. Same bouncing pattern as the max-reduce above. Unordered
- * variant (vfredusum) over ordered (vfredsum) because softmax sums
- * already absorb FP rounding; unordered is faster and the result
- * difference is below softmax's numerical tolerance. */
-#define SATURN_VFREDUSUM_F32M2(dst_scalar, src, vl) do {                   \
-    vfloat32m1_t _acc = __riscv_vfmv_v_f_f32m1((dst_scalar), 1);           \
-    _acc = __riscv_vfredusum_vs_f32m2_f32m1((src), _acc, (vl));            \
-    (dst_scalar) = __riscv_vfmv_f_s_f32m1_f32(_acc);                       \
-} while (0)
+static inline float saturn_vfredusum_f32m2_helper(float init,
+                                                  vfloat32m2_t src,
+                                                  size_t vl) {
+    vfloat32m1_t acc = __riscv_vfmv_v_f_f32m1(init, 1);
+    acc = __riscv_vfredusum_vs_f32m2_f32m1(src, acc, vl);
+    return __riscv_vfmv_f_s_f32m1_f32(acc);
+}
 
 #endif /* SATURN_CUSTOM_ASM_H */
 
@@ -412,64 +319,33 @@
       : "memory", "v0");                                                   \
 } while (0)
 
-/* Widen BF16 (ui16 carrier) -> FP32 via vzext.vf2 + vsll.vi 16.
- * This is the gem5-compatible widen path used in
- * bench_fa_mixed_rvv_native.c: gem5 25.1.0.1 SE mode lacks Zvfbfwma
- * and Zvfbfmin, so vfwcvtbf16.f.f.v isn't available; instead we
- * zero-extend each ui16 lane to ui32 and shift the BF16 bits into
- * the FP32 sign+exp+mantissa-upper-7 positions (BF16 == upper 16
- * bits of FP32). Input: 16 BF16 at LMUL=1; output: 16 FP32 at
- * LMUL=2. */
-#define SATURN_BF16_WIDEN_F32(dst, src, vl) do {                           \
-    asm volatile (                                                         \
-      "vsetvli zero, %2, e16, m1, ta, ma\n\t"                              \
-      "vle16.v v8, (%1)\n\t"                                               \
-      "vsetvli zero, %2, e32, m2, ta, ma\n\t"                              \
-      "vzext.vf2 v10, v8\n\t"                                              \
-      "vsll.vi v10, v10, 16\n\t"                                           \
-      "vse32.v v10, (%0)\n\t"                                              \
-      :: "r"(dst), "r"(src), "r"((size_t)(vl))                             \
-      : "memory", "v8", "v9", "v10", "v11");                               \
-} while (0)
+/* Mo 8 step 4d-1: Reductions via static-inline helpers using intrinsics.
+ *
+ * The previous variant declared these as `do { ... } while (0)` macros.
+ * Static inline functions let GCC inline + schedule them across
+ * surrounding code without the macro's potential scope inhibitions; the
+ * critical property is that NO asm-volatile is involved, so the OoO
+ * core can overlap reductions with adjacent ops.
+ *
+ * Used by saturn_vfredmax_to_dram_f32m2 / saturn_vfredusum_to_dram_f32m2.
+ * The BF16<->FP32 widen + narrow are no longer macros: their @instr
+ * templates emit the intrinsic chain inline at the call site. */
 
-/* Truncating narrow FP32 -> BF16 via vnsrl.wi 16. Same gem5-compat
- * reason as the widen (no Zvfbfmin). Each FP32 element's upper 16
- * bits (sign + exp + mantissa[22:16]) become the BF16 element; lower
- * 16 bits of mantissa are dropped (truncate, not round). LMUL halves:
- * 16 FP32 (M2) in -> 16 BF16 (M1) out. */
-#define SATURN_F32_NARROW_BF16(dst, src, vl) do {                          \
-    asm volatile (                                                         \
-      "vsetvli zero, %2, e32, m2, ta, ma\n\t"                              \
-      "vle32.v v4, (%1)\n\t"                                               \
-      "vsetvli zero, %2, e16, m1, ta, ma\n\t"                              \
-      "vnsrl.wi v8, v4, 16\n\t"                                            \
-      "vse16.v v8, (%0)\n\t"                                               \
-      :: "r"(dst), "r"(src), "r"((size_t)(vl))                             \
-      : "memory", "v4", "v5", "v8");                                       \
-} while (0)
+static inline float saturn_vfredmax_f32m2_helper(float init,
+                                                 vfloat32m2_t src,
+                                                 size_t vl) {
+    vfloat32m1_t acc = __riscv_vfmv_v_f_f32m1(init, 1);
+    acc = __riscv_vfredmax_vs_f32m2_f32m1(src, acc, vl);
+    return __riscv_vfmv_f_s_f32m1_f32(acc);
+}
 
-/* Reduce FP32 vector to scalar max into a DRAM-resident f32. Bounces
- * the scalar through an m1 register via vfmv.v.f init + vfredmax.vs
- * + vfmv.f.s extract. The DRAM-scalar surface keeps the @instr
- * signature uniform with the rest of the platform; step 4
- * (cycle-parity work) can replace this with a more granular variant
- * that holds the scalar in a SaturnRVV register. */
-#define SATURN_VFREDMAX_F32M2(dst_scalar, src, vl) do {                    \
-    vfloat32m1_t _acc = __riscv_vfmv_v_f_f32m1((dst_scalar), 1);           \
-    _acc = __riscv_vfredmax_vs_f32m2_f32m1((src), _acc, (vl));             \
-    (dst_scalar) = __riscv_vfmv_f_s_f32m1_f32(_acc);                       \
-} while (0)
-
-/* Reduce FP32 vector to scalar sum (unordered) into a DRAM-resident
- * f32. Same bouncing pattern as the max-reduce above. Unordered
- * variant (vfredusum) over ordered (vfredsum) because softmax sums
- * already absorb FP rounding; unordered is faster and the result
- * difference is below softmax's numerical tolerance. */
-#define SATURN_VFREDUSUM_F32M2(dst_scalar, src, vl) do {                   \
-    vfloat32m1_t _acc = __riscv_vfmv_v_f_f32m1((dst_scalar), 1);           \
-    _acc = __riscv_vfredusum_vs_f32m2_f32m1((src), _acc, (vl));            \
-    (dst_scalar) = __riscv_vfmv_f_s_f32m1_f32(_acc);                       \
-} while (0)
+static inline float saturn_vfredusum_f32m2_helper(float init,
+                                                  vfloat32m2_t src,
+                                                  size_t vl) {
+    vfloat32m1_t acc = __riscv_vfmv_v_f_f32m1(init, 1);
+    acc = __riscv_vfredusum_vs_f32m2_f32m1(src, acc, vl);
+    return __riscv_vfmv_f_s_f32m1_f32(acc);
+}
 
 #endif /* SATURN_CUSTOM_ASM_H */
 
@@ -530,64 +406,33 @@
       : "memory", "v0");                                                   \
 } while (0)
 
-/* Widen BF16 (ui16 carrier) -> FP32 via vzext.vf2 + vsll.vi 16.
- * This is the gem5-compatible widen path used in
- * bench_fa_mixed_rvv_native.c: gem5 25.1.0.1 SE mode lacks Zvfbfwma
- * and Zvfbfmin, so vfwcvtbf16.f.f.v isn't available; instead we
- * zero-extend each ui16 lane to ui32 and shift the BF16 bits into
- * the FP32 sign+exp+mantissa-upper-7 positions (BF16 == upper 16
- * bits of FP32). Input: 16 BF16 at LMUL=1; output: 16 FP32 at
- * LMUL=2. */
-#define SATURN_BF16_WIDEN_F32(dst, src, vl) do {                           \
-    asm volatile (                                                         \
-      "vsetvli zero, %2, e16, m1, ta, ma\n\t"                              \
-      "vle16.v v8, (%1)\n\t"                                               \
-      "vsetvli zero, %2, e32, m2, ta, ma\n\t"                              \
-      "vzext.vf2 v10, v8\n\t"                                              \
-      "vsll.vi v10, v10, 16\n\t"                                           \
-      "vse32.v v10, (%0)\n\t"                                              \
-      :: "r"(dst), "r"(src), "r"((size_t)(vl))                             \
-      : "memory", "v8", "v9", "v10", "v11");                               \
-} while (0)
+/* Mo 8 step 4d-1: Reductions via static-inline helpers using intrinsics.
+ *
+ * The previous variant declared these as `do { ... } while (0)` macros.
+ * Static inline functions let GCC inline + schedule them across
+ * surrounding code without the macro's potential scope inhibitions; the
+ * critical property is that NO asm-volatile is involved, so the OoO
+ * core can overlap reductions with adjacent ops.
+ *
+ * Used by saturn_vfredmax_to_dram_f32m2 / saturn_vfredusum_to_dram_f32m2.
+ * The BF16<->FP32 widen + narrow are no longer macros: their @instr
+ * templates emit the intrinsic chain inline at the call site. */
 
-/* Truncating narrow FP32 -> BF16 via vnsrl.wi 16. Same gem5-compat
- * reason as the widen (no Zvfbfmin). Each FP32 element's upper 16
- * bits (sign + exp + mantissa[22:16]) become the BF16 element; lower
- * 16 bits of mantissa are dropped (truncate, not round). LMUL halves:
- * 16 FP32 (M2) in -> 16 BF16 (M1) out. */
-#define SATURN_F32_NARROW_BF16(dst, src, vl) do {                          \
-    asm volatile (                                                         \
-      "vsetvli zero, %2, e32, m2, ta, ma\n\t"                              \
-      "vle32.v v4, (%1)\n\t"                                               \
-      "vsetvli zero, %2, e16, m1, ta, ma\n\t"                              \
-      "vnsrl.wi v8, v4, 16\n\t"                                            \
-      "vse16.v v8, (%0)\n\t"                                               \
-      :: "r"(dst), "r"(src), "r"((size_t)(vl))                             \
-      : "memory", "v4", "v5", "v8");                                       \
-} while (0)
+static inline float saturn_vfredmax_f32m2_helper(float init,
+                                                 vfloat32m2_t src,
+                                                 size_t vl) {
+    vfloat32m1_t acc = __riscv_vfmv_v_f_f32m1(init, 1);
+    acc = __riscv_vfredmax_vs_f32m2_f32m1(src, acc, vl);
+    return __riscv_vfmv_f_s_f32m1_f32(acc);
+}
 
-/* Reduce FP32 vector to scalar max into a DRAM-resident f32. Bounces
- * the scalar through an m1 register via vfmv.v.f init + vfredmax.vs
- * + vfmv.f.s extract. The DRAM-scalar surface keeps the @instr
- * signature uniform with the rest of the platform; step 4
- * (cycle-parity work) can replace this with a more granular variant
- * that holds the scalar in a SaturnRVV register. */
-#define SATURN_VFREDMAX_F32M2(dst_scalar, src, vl) do {                    \
-    vfloat32m1_t _acc = __riscv_vfmv_v_f_f32m1((dst_scalar), 1);           \
-    _acc = __riscv_vfredmax_vs_f32m2_f32m1((src), _acc, (vl));             \
-    (dst_scalar) = __riscv_vfmv_f_s_f32m1_f32(_acc);                       \
-} while (0)
-
-/* Reduce FP32 vector to scalar sum (unordered) into a DRAM-resident
- * f32. Same bouncing pattern as the max-reduce above. Unordered
- * variant (vfredusum) over ordered (vfredsum) because softmax sums
- * already absorb FP rounding; unordered is faster and the result
- * difference is below softmax's numerical tolerance. */
-#define SATURN_VFREDUSUM_F32M2(dst_scalar, src, vl) do {                   \
-    vfloat32m1_t _acc = __riscv_vfmv_v_f_f32m1((dst_scalar), 1);           \
-    _acc = __riscv_vfredusum_vs_f32m2_f32m1((src), _acc, (vl));            \
-    (dst_scalar) = __riscv_vfmv_f_s_f32m1_f32(_acc);                       \
-} while (0)
+static inline float saturn_vfredusum_f32m2_helper(float init,
+                                                  vfloat32m2_t src,
+                                                  size_t vl) {
+    vfloat32m1_t acc = __riscv_vfmv_v_f_f32m1(init, 1);
+    acc = __riscv_vfredusum_vs_f32m2_f32m1(src, acc, vl);
+    return __riscv_vfmv_f_s_f32m1_f32(acc);
+}
 
 #endif /* SATURN_CUSTOM_ASM_H */
 
@@ -648,64 +493,33 @@
       : "memory", "v0");                                                   \
 } while (0)
 
-/* Widen BF16 (ui16 carrier) -> FP32 via vzext.vf2 + vsll.vi 16.
- * This is the gem5-compatible widen path used in
- * bench_fa_mixed_rvv_native.c: gem5 25.1.0.1 SE mode lacks Zvfbfwma
- * and Zvfbfmin, so vfwcvtbf16.f.f.v isn't available; instead we
- * zero-extend each ui16 lane to ui32 and shift the BF16 bits into
- * the FP32 sign+exp+mantissa-upper-7 positions (BF16 == upper 16
- * bits of FP32). Input: 16 BF16 at LMUL=1; output: 16 FP32 at
- * LMUL=2. */
-#define SATURN_BF16_WIDEN_F32(dst, src, vl) do {                           \
-    asm volatile (                                                         \
-      "vsetvli zero, %2, e16, m1, ta, ma\n\t"                              \
-      "vle16.v v8, (%1)\n\t"                                               \
-      "vsetvli zero, %2, e32, m2, ta, ma\n\t"                              \
-      "vzext.vf2 v10, v8\n\t"                                              \
-      "vsll.vi v10, v10, 16\n\t"                                           \
-      "vse32.v v10, (%0)\n\t"                                              \
-      :: "r"(dst), "r"(src), "r"((size_t)(vl))                             \
-      : "memory", "v8", "v9", "v10", "v11");                               \
-} while (0)
+/* Mo 8 step 4d-1: Reductions via static-inline helpers using intrinsics.
+ *
+ * The previous variant declared these as `do { ... } while (0)` macros.
+ * Static inline functions let GCC inline + schedule them across
+ * surrounding code without the macro's potential scope inhibitions; the
+ * critical property is that NO asm-volatile is involved, so the OoO
+ * core can overlap reductions with adjacent ops.
+ *
+ * Used by saturn_vfredmax_to_dram_f32m2 / saturn_vfredusum_to_dram_f32m2.
+ * The BF16<->FP32 widen + narrow are no longer macros: their @instr
+ * templates emit the intrinsic chain inline at the call site. */
 
-/* Truncating narrow FP32 -> BF16 via vnsrl.wi 16. Same gem5-compat
- * reason as the widen (no Zvfbfmin). Each FP32 element's upper 16
- * bits (sign + exp + mantissa[22:16]) become the BF16 element; lower
- * 16 bits of mantissa are dropped (truncate, not round). LMUL halves:
- * 16 FP32 (M2) in -> 16 BF16 (M1) out. */
-#define SATURN_F32_NARROW_BF16(dst, src, vl) do {                          \
-    asm volatile (                                                         \
-      "vsetvli zero, %2, e32, m2, ta, ma\n\t"                              \
-      "vle32.v v4, (%1)\n\t"                                               \
-      "vsetvli zero, %2, e16, m1, ta, ma\n\t"                              \
-      "vnsrl.wi v8, v4, 16\n\t"                                            \
-      "vse16.v v8, (%0)\n\t"                                               \
-      :: "r"(dst), "r"(src), "r"((size_t)(vl))                             \
-      : "memory", "v4", "v5", "v8");                                       \
-} while (0)
+static inline float saturn_vfredmax_f32m2_helper(float init,
+                                                 vfloat32m2_t src,
+                                                 size_t vl) {
+    vfloat32m1_t acc = __riscv_vfmv_v_f_f32m1(init, 1);
+    acc = __riscv_vfredmax_vs_f32m2_f32m1(src, acc, vl);
+    return __riscv_vfmv_f_s_f32m1_f32(acc);
+}
 
-/* Reduce FP32 vector to scalar max into a DRAM-resident f32. Bounces
- * the scalar through an m1 register via vfmv.v.f init + vfredmax.vs
- * + vfmv.f.s extract. The DRAM-scalar surface keeps the @instr
- * signature uniform with the rest of the platform; step 4
- * (cycle-parity work) can replace this with a more granular variant
- * that holds the scalar in a SaturnRVV register. */
-#define SATURN_VFREDMAX_F32M2(dst_scalar, src, vl) do {                    \
-    vfloat32m1_t _acc = __riscv_vfmv_v_f_f32m1((dst_scalar), 1);           \
-    _acc = __riscv_vfredmax_vs_f32m2_f32m1((src), _acc, (vl));             \
-    (dst_scalar) = __riscv_vfmv_f_s_f32m1_f32(_acc);                       \
-} while (0)
-
-/* Reduce FP32 vector to scalar sum (unordered) into a DRAM-resident
- * f32. Same bouncing pattern as the max-reduce above. Unordered
- * variant (vfredusum) over ordered (vfredsum) because softmax sums
- * already absorb FP rounding; unordered is faster and the result
- * difference is below softmax's numerical tolerance. */
-#define SATURN_VFREDUSUM_F32M2(dst_scalar, src, vl) do {                   \
-    vfloat32m1_t _acc = __riscv_vfmv_v_f_f32m1((dst_scalar), 1);           \
-    _acc = __riscv_vfredusum_vs_f32m2_f32m1((src), _acc, (vl));            \
-    (dst_scalar) = __riscv_vfmv_f_s_f32m1_f32(_acc);                       \
-} while (0)
+static inline float saturn_vfredusum_f32m2_helper(float init,
+                                                  vfloat32m2_t src,
+                                                  size_t vl) {
+    vfloat32m1_t acc = __riscv_vfmv_v_f_f32m1(init, 1);
+    acc = __riscv_vfredusum_vs_f32m2_f32m1(src, acc, vl);
+    return __riscv_vfmv_f_s_f32m1_f32(acc);
+}
 
 #endif /* SATURN_CUSTOM_ASM_H */
 
@@ -769,64 +583,33 @@
       : "memory", "v0");                                                   \
 } while (0)
 
-/* Widen BF16 (ui16 carrier) -> FP32 via vzext.vf2 + vsll.vi 16.
- * This is the gem5-compatible widen path used in
- * bench_fa_mixed_rvv_native.c: gem5 25.1.0.1 SE mode lacks Zvfbfwma
- * and Zvfbfmin, so vfwcvtbf16.f.f.v isn't available; instead we
- * zero-extend each ui16 lane to ui32 and shift the BF16 bits into
- * the FP32 sign+exp+mantissa-upper-7 positions (BF16 == upper 16
- * bits of FP32). Input: 16 BF16 at LMUL=1; output: 16 FP32 at
- * LMUL=2. */
-#define SATURN_BF16_WIDEN_F32(dst, src, vl) do {                           \
-    asm volatile (                                                         \
-      "vsetvli zero, %2, e16, m1, ta, ma\n\t"                              \
-      "vle16.v v8, (%1)\n\t"                                               \
-      "vsetvli zero, %2, e32, m2, ta, ma\n\t"                              \
-      "vzext.vf2 v10, v8\n\t"                                              \
-      "vsll.vi v10, v10, 16\n\t"                                           \
-      "vse32.v v10, (%0)\n\t"                                              \
-      :: "r"(dst), "r"(src), "r"((size_t)(vl))                             \
-      : "memory", "v8", "v9", "v10", "v11");                               \
-} while (0)
+/* Mo 8 step 4d-1: Reductions via static-inline helpers using intrinsics.
+ *
+ * The previous variant declared these as `do { ... } while (0)` macros.
+ * Static inline functions let GCC inline + schedule them across
+ * surrounding code without the macro's potential scope inhibitions; the
+ * critical property is that NO asm-volatile is involved, so the OoO
+ * core can overlap reductions with adjacent ops.
+ *
+ * Used by saturn_vfredmax_to_dram_f32m2 / saturn_vfredusum_to_dram_f32m2.
+ * The BF16<->FP32 widen + narrow are no longer macros: their @instr
+ * templates emit the intrinsic chain inline at the call site. */
 
-/* Truncating narrow FP32 -> BF16 via vnsrl.wi 16. Same gem5-compat
- * reason as the widen (no Zvfbfmin). Each FP32 element's upper 16
- * bits (sign + exp + mantissa[22:16]) become the BF16 element; lower
- * 16 bits of mantissa are dropped (truncate, not round). LMUL halves:
- * 16 FP32 (M2) in -> 16 BF16 (M1) out. */
-#define SATURN_F32_NARROW_BF16(dst, src, vl) do {                          \
-    asm volatile (                                                         \
-      "vsetvli zero, %2, e32, m2, ta, ma\n\t"                              \
-      "vle32.v v4, (%1)\n\t"                                               \
-      "vsetvli zero, %2, e16, m1, ta, ma\n\t"                              \
-      "vnsrl.wi v8, v4, 16\n\t"                                            \
-      "vse16.v v8, (%0)\n\t"                                               \
-      :: "r"(dst), "r"(src), "r"((size_t)(vl))                             \
-      : "memory", "v4", "v5", "v8");                                       \
-} while (0)
+static inline float saturn_vfredmax_f32m2_helper(float init,
+                                                 vfloat32m2_t src,
+                                                 size_t vl) {
+    vfloat32m1_t acc = __riscv_vfmv_v_f_f32m1(init, 1);
+    acc = __riscv_vfredmax_vs_f32m2_f32m1(src, acc, vl);
+    return __riscv_vfmv_f_s_f32m1_f32(acc);
+}
 
-/* Reduce FP32 vector to scalar max into a DRAM-resident f32. Bounces
- * the scalar through an m1 register via vfmv.v.f init + vfredmax.vs
- * + vfmv.f.s extract. The DRAM-scalar surface keeps the @instr
- * signature uniform with the rest of the platform; step 4
- * (cycle-parity work) can replace this with a more granular variant
- * that holds the scalar in a SaturnRVV register. */
-#define SATURN_VFREDMAX_F32M2(dst_scalar, src, vl) do {                    \
-    vfloat32m1_t _acc = __riscv_vfmv_v_f_f32m1((dst_scalar), 1);           \
-    _acc = __riscv_vfredmax_vs_f32m2_f32m1((src), _acc, (vl));             \
-    (dst_scalar) = __riscv_vfmv_f_s_f32m1_f32(_acc);                       \
-} while (0)
-
-/* Reduce FP32 vector to scalar sum (unordered) into a DRAM-resident
- * f32. Same bouncing pattern as the max-reduce above. Unordered
- * variant (vfredusum) over ordered (vfredsum) because softmax sums
- * already absorb FP rounding; unordered is faster and the result
- * difference is below softmax's numerical tolerance. */
-#define SATURN_VFREDUSUM_F32M2(dst_scalar, src, vl) do {                   \
-    vfloat32m1_t _acc = __riscv_vfmv_v_f_f32m1((dst_scalar), 1);           \
-    _acc = __riscv_vfredusum_vs_f32m2_f32m1((src), _acc, (vl));            \
-    (dst_scalar) = __riscv_vfmv_f_s_f32m1_f32(_acc);                       \
-} while (0)
+static inline float saturn_vfredusum_f32m2_helper(float init,
+                                                  vfloat32m2_t src,
+                                                  size_t vl) {
+    vfloat32m1_t acc = __riscv_vfmv_v_f_f32m1(init, 1);
+    acc = __riscv_vfredusum_vs_f32m2_f32m1(src, acc, vl);
+    return __riscv_vfmv_f_s_f32m1_f32(acc);
+}
 
 #endif /* SATURN_CUSTOM_ASM_H */
 
@@ -887,64 +670,33 @@
       : "memory", "v0");                                                   \
 } while (0)
 
-/* Widen BF16 (ui16 carrier) -> FP32 via vzext.vf2 + vsll.vi 16.
- * This is the gem5-compatible widen path used in
- * bench_fa_mixed_rvv_native.c: gem5 25.1.0.1 SE mode lacks Zvfbfwma
- * and Zvfbfmin, so vfwcvtbf16.f.f.v isn't available; instead we
- * zero-extend each ui16 lane to ui32 and shift the BF16 bits into
- * the FP32 sign+exp+mantissa-upper-7 positions (BF16 == upper 16
- * bits of FP32). Input: 16 BF16 at LMUL=1; output: 16 FP32 at
- * LMUL=2. */
-#define SATURN_BF16_WIDEN_F32(dst, src, vl) do {                           \
-    asm volatile (                                                         \
-      "vsetvli zero, %2, e16, m1, ta, ma\n\t"                              \
-      "vle16.v v8, (%1)\n\t"                                               \
-      "vsetvli zero, %2, e32, m2, ta, ma\n\t"                              \
-      "vzext.vf2 v10, v8\n\t"                                              \
-      "vsll.vi v10, v10, 16\n\t"                                           \
-      "vse32.v v10, (%0)\n\t"                                              \
-      :: "r"(dst), "r"(src), "r"((size_t)(vl))                             \
-      : "memory", "v8", "v9", "v10", "v11");                               \
-} while (0)
+/* Mo 8 step 4d-1: Reductions via static-inline helpers using intrinsics.
+ *
+ * The previous variant declared these as `do { ... } while (0)` macros.
+ * Static inline functions let GCC inline + schedule them across
+ * surrounding code without the macro's potential scope inhibitions; the
+ * critical property is that NO asm-volatile is involved, so the OoO
+ * core can overlap reductions with adjacent ops.
+ *
+ * Used by saturn_vfredmax_to_dram_f32m2 / saturn_vfredusum_to_dram_f32m2.
+ * The BF16<->FP32 widen + narrow are no longer macros: their @instr
+ * templates emit the intrinsic chain inline at the call site. */
 
-/* Truncating narrow FP32 -> BF16 via vnsrl.wi 16. Same gem5-compat
- * reason as the widen (no Zvfbfmin). Each FP32 element's upper 16
- * bits (sign + exp + mantissa[22:16]) become the BF16 element; lower
- * 16 bits of mantissa are dropped (truncate, not round). LMUL halves:
- * 16 FP32 (M2) in -> 16 BF16 (M1) out. */
-#define SATURN_F32_NARROW_BF16(dst, src, vl) do {                          \
-    asm volatile (                                                         \
-      "vsetvli zero, %2, e32, m2, ta, ma\n\t"                              \
-      "vle32.v v4, (%1)\n\t"                                               \
-      "vsetvli zero, %2, e16, m1, ta, ma\n\t"                              \
-      "vnsrl.wi v8, v4, 16\n\t"                                            \
-      "vse16.v v8, (%0)\n\t"                                               \
-      :: "r"(dst), "r"(src), "r"((size_t)(vl))                             \
-      : "memory", "v4", "v5", "v8");                                       \
-} while (0)
+static inline float saturn_vfredmax_f32m2_helper(float init,
+                                                 vfloat32m2_t src,
+                                                 size_t vl) {
+    vfloat32m1_t acc = __riscv_vfmv_v_f_f32m1(init, 1);
+    acc = __riscv_vfredmax_vs_f32m2_f32m1(src, acc, vl);
+    return __riscv_vfmv_f_s_f32m1_f32(acc);
+}
 
-/* Reduce FP32 vector to scalar max into a DRAM-resident f32. Bounces
- * the scalar through an m1 register via vfmv.v.f init + vfredmax.vs
- * + vfmv.f.s extract. The DRAM-scalar surface keeps the @instr
- * signature uniform with the rest of the platform; step 4
- * (cycle-parity work) can replace this with a more granular variant
- * that holds the scalar in a SaturnRVV register. */
-#define SATURN_VFREDMAX_F32M2(dst_scalar, src, vl) do {                    \
-    vfloat32m1_t _acc = __riscv_vfmv_v_f_f32m1((dst_scalar), 1);           \
-    _acc = __riscv_vfredmax_vs_f32m2_f32m1((src), _acc, (vl));             \
-    (dst_scalar) = __riscv_vfmv_f_s_f32m1_f32(_acc);                       \
-} while (0)
-
-/* Reduce FP32 vector to scalar sum (unordered) into a DRAM-resident
- * f32. Same bouncing pattern as the max-reduce above. Unordered
- * variant (vfredusum) over ordered (vfredsum) because softmax sums
- * already absorb FP rounding; unordered is faster and the result
- * difference is below softmax's numerical tolerance. */
-#define SATURN_VFREDUSUM_F32M2(dst_scalar, src, vl) do {                   \
-    vfloat32m1_t _acc = __riscv_vfmv_v_f_f32m1((dst_scalar), 1);           \
-    _acc = __riscv_vfredusum_vs_f32m2_f32m1((src), _acc, (vl));            \
-    (dst_scalar) = __riscv_vfmv_f_s_f32m1_f32(_acc);                       \
-} while (0)
+static inline float saturn_vfredusum_f32m2_helper(float init,
+                                                  vfloat32m2_t src,
+                                                  size_t vl) {
+    vfloat32m1_t acc = __riscv_vfmv_v_f_f32m1(init, 1);
+    acc = __riscv_vfredusum_vs_f32m2_f32m1(src, acc, vl);
+    return __riscv_vfmv_f_s_f32m1_f32(acc);
+}
 
 #endif /* SATURN_CUSTOM_ASM_H */
 
@@ -976,7 +728,7 @@ for (int_fast32_t h = 0; h < 8; h++) {
       vfloat32m2_t K_scaled;
       K_nvfp4_reg = __riscv_vle16_v_u16m1(&K_nvfp4[(h) * (seq_len * 64) + (s) * (64) + (kblk) * (16)], (16));
       SATURN_VFCONV_NVFP4_BF16(&K_bf16_reg, &K_nvfp4_reg, (16));
-      SATURN_BF16_WIDEN_F32(&K_fp32_reg, &K_bf16_reg, (16));
+      asm volatile ("vsetvli zero, %0, e32, m2, ta, ma" :: "r"((size_t)((16)))); K_fp32_reg = __riscv_vreinterpret_v_u32m2_f32m2(__riscv_vsll_vx_u32m2(__riscv_vzext_vf2_u32m2(K_bf16_reg, (16)), 16, (16)));
       K_scaled = __riscv_vfmul_vf_f32m2(K_fp32_reg, K_scale[(h) * (seq_len * 4) + (s) * 4 + kblk], (16));
       __riscv_vse32_v_f32m2(&K_fp32_row[16 * kblk], K_scaled, (16));
     }
@@ -990,7 +742,7 @@ for (int_fast32_t h = 0; h < 8; h++) {
       S_acc = __riscv_vfmacc_vv_f32m2(S_acc, Q_reg, K_reg, (16));
     }
     S_fp32[s] = 0.0f;
-    SATURN_VFREDUSUM_F32M2(S_fp32[s], S_acc, (16));
+    S_fp32[s] = saturn_vfredusum_f32m2_helper(S_fp32[s], S_acc, (16));
     S_fp32[s] = S_fp32[s] * qk_scale[0];
   }
   m_state[0] = -1e+30f;
@@ -998,7 +750,7 @@ for (int_fast32_t h = 0; h < 8; h++) {
   for (int_fast32_t so1 = 0; so1 < ((seq_len) / (16)); so1++) {
     vfloat32m2_t S_reg1;
     S_reg1 = __riscv_vle32_v_f32m2(&S_fp32[16 * so1], (16));
-    SATURN_VFREDMAX_F32M2(m_state[0], S_reg1, (16));
+    m_state[0] = saturn_vfredmax_f32m2_helper(m_state[0], S_reg1, (16));
   }
   for (int_fast32_t so2 = 0; so2 < ((seq_len) / (16)); so2++) {
     vfloat32m2_t S_reg2;
@@ -1007,10 +759,10 @@ for (int_fast32_t h = 0; h < 8; h++) {
     vfloat32m2_t P_reg;
     S_reg2 = __riscv_vle32_v_f32m2(&S_fp32[16 * so2], (16));
     S_shifted = __riscv_vfsub_vf_f32m2(S_reg2, m_state[0], (16));
-    SATURN_F32_NARROW_BF16(&S_bf16, &S_shifted, (16));
+    asm volatile ("vsetvli zero, %0, e16, m1, ta, ma" :: "r"((size_t)((16)))); S_bf16 = __riscv_vnsrl_wx_u16m1(__riscv_vreinterpret_v_f32m2_u32m2(S_shifted), 16, (16));
     SATURN_VFEXP(&P_reg, &S_bf16, (16));
     __riscv_vse32_v_f32m2(&P_fp32[16 * so2], P_reg, (16));
-    SATURN_VFREDUSUM_F32M2(l_state[0], P_reg, (16));
+    l_state[0] = saturn_vfredusum_f32m2_helper(l_state[0], P_reg, (16));
   }
   for (int_fast32_t d = 0; d < 64; d++) {
     O_fp32[h * 64 + d] = 0.0f;
@@ -1023,7 +775,7 @@ for (int_fast32_t h = 0; h < 8; h++) {
       vfloat32m2_t V_scaled;
       V_nvfp4_reg = __riscv_vle16_v_u16m1(&V_nvfp4[(h) * (seq_len * 64) + (s) * (64) + (vblk) * (16)], (16));
       SATURN_VFCONV_NVFP4_BF16(&V_bf16_reg, &V_nvfp4_reg, (16));
-      SATURN_BF16_WIDEN_F32(&V_fp32_reg, &V_bf16_reg, (16));
+      asm volatile ("vsetvli zero, %0, e32, m2, ta, ma" :: "r"((size_t)((16)))); V_fp32_reg = __riscv_vreinterpret_v_u32m2_f32m2(__riscv_vsll_vx_u32m2(__riscv_vzext_vf2_u32m2(V_bf16_reg, (16)), 16, (16)));
       V_scaled = __riscv_vfmul_vf_f32m2(V_fp32_reg, V_scale[(h) * (seq_len * 4) + (s) * 4 + vblk], (16));
       __riscv_vse32_v_f32m2(&V_fp32_row[16 * vblk], V_scaled, (16));
     }
@@ -1048,12 +800,12 @@ free(S_fp32);
 
 /* relying on the following instruction..."
 saturn_bf16_widen_f32_m2(dst,src,vl)
-SATURN_BF16_WIDEN_F32(&{dst_data}, &{src_data}, {vl});
+asm volatile ("vsetvli zero, %0, e32, m2, ta, ma" :: "r"((size_t)({vl}))); {dst_data} = __riscv_vreinterpret_v_u32m2_f32m2(__riscv_vsll_vx_u32m2(__riscv_vzext_vf2_u32m2({src_data}, {vl}), 16, {vl}));
 */
 
 /* relying on the following instruction..."
 saturn_f32_narrow_bf16_m2(dst,src,vl)
-SATURN_F32_NARROW_BF16(&{dst_data}, &{src_data}, {vl});
+asm volatile ("vsetvli zero, %0, e16, m1, ta, ma" :: "r"((size_t)({vl}))); {dst_data} = __riscv_vnsrl_wx_u16m1(__riscv_vreinterpret_v_f32m2_u32m2({src_data}), 16, {vl});
 */
 
 /* relying on the following instruction..."
@@ -1078,12 +830,12 @@ saturn_vfmv_zero_f32m2(dst,vl)
 
 /* relying on the following instruction..."
 saturn_vfredmax_to_dram_f32m2(dst,src,vl)
-SATURN_VFREDMAX_F32M2({dst_data}, {src_data}, {vl});
+{dst_data} = saturn_vfredmax_f32m2_helper({dst_data}, {src_data}, {vl});
 */
 
 /* relying on the following instruction..."
 saturn_vfredusum_to_dram_f32m2(dst,src,vl)
-SATURN_VFREDUSUM_F32M2({dst_data}, {src_data}, {vl});
+{dst_data} = saturn_vfredusum_f32m2_helper({dst_data}, {src_data}, {vl});
 */
 
 /* relying on the following instruction..."
