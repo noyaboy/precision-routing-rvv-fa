@@ -1328,7 +1328,10 @@ All RTL (Saturn fork, 57/57 ChiselTests, Yosys-synthesized to a 16 nm
 area estimate), gem5 patches (RISC-V decoder + FU-latency wiring +
 microbenches), Exo `@instr` declarations + the precision-routing
 scheduling pass, and end-to-end kernel source open-source under
-permissive license. Next steps for the Y2 follow-on: a HBM
+permissive license. Artifact repositories:
+main project at `<TODO_MAIN_URL>`,
+Exo fork at `<TODO_EXO_URL>`,
+gem5 fork at `<TODO_GEM5_URL>`. Next steps for the Y2 follow-on: a HBM
 bandwidth model in gem5 to verify the projected speedup, GCC
 intrinsic support for the Saturn customs to close the
 compiler-parity gap, FireSim integration for real-Saturn-µarch

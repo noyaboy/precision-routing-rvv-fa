@@ -1,6 +1,41 @@
-# Public Push Checklist
+# Public Push Checklist (minimal user-action version)
 
-Pre-push state verified 2026-05-18. Three repos to push:
+The README + paper/paper_draft.md have been pre-staged with
+`<TODO_MAIN_URL>` / `<TODO_EXO_URL>` / `<TODO_GEM5_URL>` placeholders.
+After pushing the 3 repos, run
+`paper/scripts/finalize_public_push.sh <main> <exo> <gem5>` to
+substitute the real URLs in one shot.
+
+## Truly minimal user-action sequence
+
+```bash
+# 1. Auth once
+gh auth login
+
+# 2. Create + push each repo (one command each, gh handles the push)
+cd /home/noah/project/riscv
+gh repo create precision-routing-rvv-fa --public --source=. --remote=origin --push
+
+cd exo
+gh repo create exo-saturn-rvv --public --source=. --remote=origin --push
+
+cd ../gem5
+gh repo create gem5-saturn-fu --public --source=. --remote=origin --push
+
+# 3. Back to main repo: substitute URLs + commit + push
+cd /home/noah/project/riscv
+./paper/scripts/finalize_public_push.sh \
+  https://github.com/<YOUR_USERNAME>/precision-routing-rvv-fa \
+  https://github.com/<YOUR_USERNAME>/exo-saturn-rvv \
+  https://github.com/<YOUR_USERNAME>/gem5-saturn-fu
+git add README.md paper/paper_draft.md
+git commit -m "Public push: hosted-repo URLs in README + paper §9"
+git push
+```
+
+That's it. ~5 commands, ~10 minutes hands-on.
+
+## Pre-push state verified 2026-05-18. Three repos to push:
 
 | Repo | Local path | Branch | Commits to push | Notes |
 |---|---|---|---|---|
