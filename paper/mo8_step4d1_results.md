@@ -1,6 +1,23 @@
 # Mo 8 step 4d-1 — intrinsic rewrite of 4 macros
 
-## Headline
+> **RECONCILED 2026-05-18**: the original 1.21× headline below
+> compared against a **stale hand-coded bench binary** (L2K,
+> mtime 2026-05-17 18:50) that gave 4.76 M cycles. Rebuilding
+> the bench from current source gives **5.49 M cycles / 2.40
+> IPC**, matching §7.5 Table 5. The recomputed compiler-parity
+> ratio for step 4d-1 is **1.046×, MEETING the ≤10 % PASS
+> target**. See `paper/section7_audit_notes.md` Finding 1 for
+> the rebuild-and-measure protocol. The body of this doc is
+> kept in its original 1.21× form for the work-record.
+
+## Headline (RECOMPUTED with reconciled baseline)
+
+**Mo 8 step 4d-1 PASS** at L2K against the rebuilt hand-coded
+bench: **5,744,457 cycles / 0.631 IPC, 1.046× over hand-coded
+(5,490,885 / 2.395 IPC)** — inside the ≤10 % compiler-parity
+PASS threshold by 5.4 pp.
+
+## Headline (ORIGINAL, against stale bench binary)
 
 **Mo 8 step 4d-1 PROGRESS** (not PASS).
 Rewrote the 4 high-cost asm-volatile macros (BF16↔FP32 widen/narrow,

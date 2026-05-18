@@ -14,9 +14,10 @@ contributions:
   declaring the four customs (plus 10 standard-RVV helpers) and
   lowering a high-level `fa_kernel_decode_naive` `@proc` to the
   fused-FA decode-step kernel through 14 sub-schedules. The
-  Exo-generated kernel runs end-to-end on gem5 at **1.21× the
+  Exo-generated kernel runs end-to-end on gem5 at **1.046× the
   hand-coded reference** (5.74 M cyc / 0.631 IPC at L2 K, vs
-  4.76 M cyc / 1.366 IPC hand-coded).
+  5.49 M cyc / 2.40 IPC hand-coded) — meeting the ≤10 %
+  compiler-parity PASS target.
 - **Hand-coded fused-FA kernel** verified on gem5 RiscvO3CPU at
   `head_dim = 64` across `seq_len ∈ {2 K, 4 K, 8 K, 16 K}`:
   - 3.56× KV-cache DRAM-bandwidth reduction (verified).
@@ -99,19 +100,19 @@ L2 K case lands at 1.59×, within 6 % of the literal target). The
 delta are *verified*. See `paper/paper_draft.md` § 7.5–7.6 for the
 full discussion.
 
-The Exo-generated kernel reaches **1.21× the hand-coded reference**
-on gem5 (down from 1.30× before targeted intrinsic-rewrite
-optimisation). The ≤10 % compiler-parity PASS target is not yet
-met; the remaining 11 pp gap is scoped in `paper/paper_draft.md` §5.6
-to Saturn `.4byte` custom asm-volatile overhead — closing it
-requires GCC intrinsic support for the Saturn customs (upstream
-coordination), Exo register-subview support, or a peephole-merge
-pass over consecutive asm-volatile macros.
+The Exo-generated kernel reaches **1.046× the hand-coded
+reference** on gem5 (down from 1.12× before targeted
+intrinsic-rewrite optimisation), **meeting the ≤10 %
+compiler-parity PASS target**. The 4.6 pp residual is decomposed
+in `paper/paper_draft.md` §5.6. Three optional optimisation paths
+remain available (upstream GCC intrinsics for the Saturn customs,
+Exo register-subview support, peephole-merge of consecutive
+asm-volatile macros) — none are needed for PASS; all would extend
+the result further into the under-target zone.
 
 Y2 work — FireSim integration for real-Saturn-µarch validation, a
-HBM bandwidth model in gem5, GCC intrinsic support for the Saturn
-customs to close the compiler-parity gap, and Llama-3.2-1B
-end-to-end measurement — is outlined in § 9 of the paper.
+HBM bandwidth model in gem5, and Llama-3.2-1B end-to-end
+measurement — is outlined in § 9 of the paper.
 
 ## License
 

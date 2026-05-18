@@ -1,6 +1,24 @@
 # Mo 8 step 4d (final) — cycle-parity optimization results
 
-## Headline
+> **RECONCILED 2026-05-18**: the original 1.21× headline below
+> compared the Exo result against a **stale hand-coded bench
+> binary** (L2K, mtime 2026-05-17 18:50, from an earlier source
+> state) that gave 4.76 M cycles. Rebuilding the bench from the
+> current source gives **5.49 M cycles / 2.40 IPC**, matching
+> §7.5 Table 5. The recomputed compiler-parity ratio is
+> **1.046×, MEETING the ≤10 % PASS target**. See
+> `paper/section7_audit_notes.md` Finding 1 for the
+> rebuild-and-measure protocol. The body of this doc below is
+> kept in its original 1.21× form for the work-record.
+
+## Headline (RECOMPUTED with reconciled baseline)
+
+**Mo 8 step 4d done; PASS target MET.** Final state at L2K
+post-reconciliation: **5,743,133 cycles / 0.631 IPC, 1.046×
+over hand-coded bench (5,490,885 / 2.395 IPC)** — within the
+≤10 % compiler-parity PASS threshold by 5.4 pp.
+
+## Headline (ORIGINAL, against stale bench binary)
 
 **Mo 8 step 4d done; PASS target not met but gap closed substantially.**
 Final state at L2K: **5,743,133 cycles / 0.631 IPC, 1.21× over hand-

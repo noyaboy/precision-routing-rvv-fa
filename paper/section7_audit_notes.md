@@ -20,7 +20,24 @@ post-Mo-8). The audit specifically looked for:
 
 ## Findings
 
-### 1. Numerical inconsistency: hand-coded native at L2K
+### 1. Numerical inconsistency: hand-coded native at L2K (RESOLVED 2026-05-18)
+
+**Resolution**: the `bench_fa_mixed_rvv_native_g14` binary on disk
+at the time of the step 4c gem5 run (2026-05-18) was **stale** —
+built 2026-05-17 18:50:30 from an earlier source state; the L4K
+/ L8K / L16K binaries (rebuilt 2026-05-17 20:00) capture the
+post-edit state. Rebuilding the L2K binary from the current
+source (2026-05-18 19:05) and re-running gives **5,490,885 cyc /
+2.395 IPC**, exact match with §7.5 Table 5's 5.49 M / 2.40 IPC.
+The 4.76 M figure in the pre-resolution §5.6 draft was from the
+stale binary.
+
+**Mo 8 PASS implication**: the compiler-parity ratio recomputes
+as 5,743,133 / 5,490,885 = **1.046×, MEETING the ≤10 % PASS
+target**. §5.6 + §1 + §9 + Abstract + README + step-4d result
+docs all updated in the same commit as this audit-notes update.
+
+**Original audit context (kept for the record)**:
 
 **Location**: §5.6 row "Hand-coded `bench_fa_mixed_rvv_native_g14`"
 vs §7.5 Table 5 row "L2 K Native (FU)".
@@ -102,14 +119,11 @@ finalization and are independent of the Mo 8 Exo work.
 
 | Finding                                                | Status         |
 |--------------------------------------------------------|----------------|
-| §5.6 vs §7.5 L2K cycle inconsistency (4.76 M vs 5.49 M) | **Open** — needs re-measurement to reconcile |
-| §7.7 GCC 14.2 "fixed" claim                            | **Fixed** in this audit pass   |
+| §5.6 vs §7.5 L2K cycle inconsistency (4.76 M vs 5.49 M) | **Resolved** — bench rebuilt 2026-05-18; canonical = 5.49 M; Mo 8 PASS verdict flipped to MET |
+| §7.7 GCC 14.2 "fixed" claim                            | **Fixed** in the audit pass    |
 | §7.1, §7.2, §7.3, §7.4, §7.6 other sections            | Clean          |
 
-The open finding (#1) is significant because the Mo 8 PASS verdict
-in §5.6 hinges on which L2K baseline is canonical. A follow-on pass
-should re-run the hand-coded bench under §7.1's exact gem5 launch
-configuration and decide between the 4.76 M and 5.49 M numbers; if
-the canonical number is the larger one, the Mo 8 compiler-parity
-target (≤10 %) shifts from "not met (1.21 ×)" to "met (1.05 ×)" —
-a meaningful headline change.
+The reconciliation flipped the Mo 8 compiler-parity verdict from
+"not met (1.21 ×)" to **MET (1.046 ×)**. The Exo result of 5.74 M
+cyc against the rebuilt hand-coded 5.49 M baseline lands inside
+the ≤10 % PASS threshold by a margin of 5.4 pp.
