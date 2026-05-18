@@ -9,31 +9,38 @@ substitute the real URLs in one shot.
 ## Truly minimal user-action sequence
 
 ```bash
-# 1. Auth once
-gh auth login
+# 1. Create 3 empty repos in the host's web UI (browser):
+#    - GitHub: https://github.com/new
+#    - Codeberg: https://codeberg.org/repo/create
+#    Set visibility = public. DO NOT initialize with README / .gitignore /
+#    LICENSE (we have local content already). Suggested names:
+#      precision-routing-rvv-fa   (main project)
+#      exo-saturn-rvv             (Exo fork)
+#      gem5-saturn-fu             (gem5 fork)
+#    Copy the three URLs from the host's "create repo" screen.
 
-# 2. Create + push each repo (one command each, gh handles the push)
-cd /home/noah/project/riscv
-gh repo create precision-routing-rvv-fa --public --source=. --remote=origin --push
+# 2. Wire remotes + push each repo
+cd ./
+git remote add origin <MAIN_URL>
+git push -u origin main
 
 cd exo
-gh repo create exo-saturn-rvv --public --source=. --remote=origin --push
+git remote add origin <EXO_URL>
+git push -u origin main
 
 cd ../gem5
-gh repo create gem5-saturn-fu --public --source=. --remote=origin --push
+git remote add origin <GEM5_URL>
+git push -u origin stable
 
-# 3. Back to main repo: substitute URLs + commit + push
-cd /home/noah/project/riscv
-./paper/scripts/finalize_public_push.sh \
-  https://github.com/<YOUR_USERNAME>/precision-routing-rvv-fa \
-  https://github.com/<YOUR_USERNAME>/exo-saturn-rvv \
-  https://github.com/<YOUR_USERNAME>/gem5-saturn-fu
+# 3. Back to main repo: substitute URLs in README + paper, commit, push
+cd ./
+./paper/scripts/finalize_public_push.sh <MAIN_URL> <EXO_URL> <GEM5_URL>
 git add README.md paper/paper_draft.md
 git commit -m "Public push: hosted-repo URLs in README + paper §9"
 git push
 ```
 
-That's it. ~5 commands, ~10 minutes hands-on.
+That's it. 3 web-UI clicks + ~7 git commands, ~10 minutes hands-on.
 
 ## Pre-push state verified 2026-05-18. Three repos to push:
 
