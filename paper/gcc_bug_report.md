@@ -1,10 +1,19 @@
-# GCC bug report — RVV vsetvli pass picks wrong vtype for widening-intrinsic chain at `-O2` (GCC 13.x only)
+# GCC bug report — RVV vsetvli pass picks wrong vtype for widening-intrinsic chain at `-O2`
 
-**Status**: Draft. Ready to file at https://gcc.gnu.org/bugzilla/ as a
-**backport request** against the 13 branch — the bug was fixed in
-GCC 14.2.0 (verified, see "Cross-version status" below). Submit under
-your own name. Suggested component: `target` → `riscv`. Suggested
-severity: `normal` (silent miscompile, not crash).
+**Status**: Draft. Ready to file at https://gcc.gnu.org/bugzilla/. Two
+related issues now documented:
+
+- **Part 1** (GCC 13.x): pure-intrinsic widening chain miscompiles —
+  backport request against the 13 branch (the bug was fixed in
+  14.2.0 for the no-asm-volatile case).
+- **Part 2** (GCC 14.2.x, possibly 15.x): the 14.2 fix is **partial**
+  — the same wrong-vtype emission still happens when an asm-volatile
+  block precedes the widening chain. Discovered 2026-05-18 during the
+  Mo 8 step 4d-1 intrinsic-rewrite work; section added at the end of
+  this report.
+
+Submit under your own name. Suggested component: `target` → `riscv`.
+Suggested severity: `normal` (silent miscompile, not crash).
 
 ---
 
@@ -62,13 +71,16 @@ Target: riscv64-buildroot-linux-gnu
 | GCC version              | Source                          | Status at `-O2` |
 |--------------------------|---------------------------------|------------------|
 | 13.2.0                   | Bootlin 2024.02-1 (Buildroot)   | **BUGGY** — emits 1 vsetvli at e16 m1; vzext.vf2 reads wrong-width source |
-| 14.2.0                   | Bootlin 2024.05-1 (Buildroot)   | **FIXED** — emits 1 vsetvli at e32 m2; correct |
-| 15.1.0                   | Bootlin 2025.08-1 (Buildroot)   | **FIXED** — same correct emission as 14.2 |
+| 14.2.0 (pure intrinsic)  | Bootlin 2024.05-1 (Buildroot)   | **FIXED** — emits 1 vsetvli at e32 m2; correct |
+| 14.2.0 (after asm-volatile) | Bootlin 2024.05-1 (Buildroot) | **STILL BUGGY** — see "Part 2" section below; the asm-volatile defeats GCC 14.2's vsetvli demand-set logic |
+| 15.1.0 (pure intrinsic)  | Bootlin 2025.08-1 (Buildroot)   | **FIXED** — same correct emission as 14.2 (asm-volatile case not yet tested) |
 
-All three were tested with the identical 7-line reproducer below on
-the same host (Ubuntu 20.04, x86_64). The fix landed somewhere in
-the GCC 14 development cycle — the GCC 13 branch is the only one
-still affected.
+All four were tested with the relevant reproducer below on
+the same host (Ubuntu 20.04, x86_64). For the pure-intrinsic case,
+the fix landed somewhere in the GCC 14 development cycle — the
+GCC 13 branch is the only one still affected. For the
+asm-volatile-preceded case (Part 2 below), GCC 14.2 still requires
+a workaround.
 
 ## Output: GCC 13.2 at `-O2` (BUG)
 
@@ -205,3 +217,138 @@ demand-set logic for this case and backport to the active 13 branch
 limitation of the 13-branch vsetvli pass so users on GCC 13.x can
 deploy the inline-asm-barrier workaround pre-emptively in
 SEW-changing intrinsic chains.
+
+---
+
+# Part 2 — GCC 14.2 partial-fix: vsetvli pass still wrong after asm-volatile
+
+**Discovered 2026-05-18** during Mo 8 step 4d-1 of the same project
+(intrinsic-rewrite optimisation of a hand-coded Saturn-FU
+asm-volatile macro to a standard-RVV intrinsic chain). The pure-
+intrinsic widening pattern from Part 1 now compiles correctly at
+GCC 14.2, but when a preceding `asm volatile (...)` block has
+internally changed `vtype` (e.g., a custom-instruction macro that
+issues its own `vsetvli`) and then exits, GCC 14.2's vsetvli pass
+**fails to recognise that vtype has been clobbered** and emits no
+vsetvli before the subsequent widening intrinsic. Result: the
+identical miscompile as Part 1.
+
+## Minimal reproducer (Part 2)
+
+```c
+#include <riscv_vector.h>
+#include <stdint.h>
+
+/* Stand-in for the Saturn custom: any asm-volatile that changes
+ * vtype internally and doesn't declare it clobbered. The
+ * .4byte is a Saturn custom encoding, but the bug reproduces
+ * with any asm-volatile that runs a `vsetvli` to a different
+ * SEW/LMUL inside. */
+#define ASM_INNER_VSETVLI(dst, src, vl) do {                       \
+    asm volatile (                                                 \
+      "vsetvli zero, %2, e16, m1, ta, ma\n\t"                      \
+      "vle16.v v0, (%1)\n\t"                                       \
+      "vse16.v v0, (%0)\n\t"                                       \
+      :: "r"(dst), "r"(src), "r"((size_t)(vl))                     \
+      : "memory", "v0");                                           \
+} while (0)
+
+void widen_after_asm(const uint16_t *src,
+                     uint16_t       *bf16_stash,
+                     uint32_t       *dst,
+                     size_t          vl) {
+    ASM_INNER_VSETVLI(bf16_stash, src, vl);    /* leaves vtype = e16, m1 */
+    vuint16m1_t a = __riscv_vle16_v_u16m1(bf16_stash, vl);
+    vuint32m2_t b = __riscv_vzext_vf2_u32m2(a, vl);    /* needs e32, m2 */
+    __riscv_vse32_v_u32m2(dst, b, vl);
+}
+```
+
+## Output: GCC 14.2 at `-O2` (BUG)
+
+```asm
+widen_after_asm:
+    vsetvli zero, a3, e16, m1, ta, ma       # from the asm-volatile
+    vle16.v v0, (a0)
+    vse16.v v0, (a1)
+    ; <-- NO vsetvli emitted here despite vzext.vf2 needing e32, m2 -->
+    vle16.v v1, (a1)                        # EEW=16 baked in (correct)
+    vzext.vf2 v2, v1                        # at SEW=16, source EEW=8 (BUG)
+    vse32.v v2, (a2)
+```
+
+The vzext.vf2 again reads the wrong-width source — identical
+end-state miscompile as Part 1 of this report.
+
+## Workarounds tested
+
+1. **`(void)__riscv_vsetvl_e32m2(vl);`** — the explicit vsetvl
+   intrinsic call returns a `size_t` we don't use, so GCC's DCE
+   eliminates the call entirely. The vsetvli is **NOT emitted**.
+   Verified by inspecting the emitted C and the disassembly.
+
+2. **`asm volatile ("vsetvli zero, %0, e32, m2, ta, ma" ::
+   "r"((size_t)(vl)));`** — single-instruction asm-volatile.
+   GCC cannot elide this, so the vsetvli IS emitted. **This is
+   the workaround we deploy in production**:
+
+   ```c
+   asm volatile ("vsetvli zero, %0, e32, m2, ta, ma"
+                 :: "r"((size_t)(vl)));
+   vuint16m1_t a = __riscv_vle16_v_u16m1(bf16_stash, vl);
+   vuint32m2_t b = __riscv_vzext_vf2_u32m2(a, vl);
+   __riscv_vse32_v_u32m2(dst, b, vl);
+   ```
+
+   Cost: 1 extra `vsetvli` per widening site. In the Mo 8 step
+   4d-1 kernel this was ~250 K cycles of explicit-barrier overhead
+   on top of an otherwise-clean intrinsic chain at L2K
+   (cf. `paper/mo8_step4d1_results.md`).
+
+3. **Opacity barrier on `vl`** (Part 1's workaround,
+   `asm volatile ("" : "+r"(vl));`) — does **NOT** fix the Part 2
+   case. The barrier is between the explicit vsetvl call and the
+   vle16, but the issue is that the explicit vsetvl call itself
+   gets DCE'd in the asm-volatile-preceded case.
+
+## Where the bug bites — diagnosis
+
+GCC 14.2's vsetvli demand-set pass needs to recognise that an
+`asm volatile` block with no explicit declaration of the VTYPE
+register as clobbered may *still* clobber VTYPE if the body
+contains a `vsetvli` instruction. The pass currently appears to
+treat such asm-volatile blocks as VTYPE-preserving.
+
+Two possible remediation paths:
+
+a. **Conservative**: treat every `asm volatile` block as a VTYPE
+   barrier (forces a vsetvli before any subsequent vector op
+   that doesn't have a baked-in EEW). Slight cost on legitimate
+   non-vtype-modifying asm-volatile blocks, but correctness-safe.
+
+b. **Precise**: scan the asm-volatile body for `vsetvli` (or
+   `vsetivli`) and only treat as a VTYPE barrier if found. More
+   complex but no false-positive vsetvli emissions.
+
+Either path would close Part 2.
+
+## Impact
+
+Same impact class as Part 1: silent miscompile, no warning,
+common RVV widening idiom. The Part 2 case is particularly
+relevant for **co-design projects mixing custom-instruction
+asm-volatile macros with standard-RVV intrinsics** — exactly
+the Mo 8 step 4d-1 scenario where we hit it. Project-custom
+RVV instructions (e.g., the Berkeley Saturn `.4byte` customs
+in our case) cannot be expressed as GCC intrinsics, so they
+must go through asm-volatile, putting them in direct conflict
+with the surrounding intrinsic-based scheduling.
+
+## Suggested action for the GCC maintainers (Part 2)
+
+Treat asm-volatile blocks as VTYPE barriers in the vsetvli
+demand-set pass (option (a) above is the safest, least-invasive
+fix). Until then, document the workaround (option 2 above) as a
+known interaction in the GCC RISC-V backend's vsetvli pass docs
+so users mixing intrinsics and asm-volatile know to deploy it
+defensively.
