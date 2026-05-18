@@ -1158,12 +1158,26 @@ intrinsic. We minimized the bug to a 7-line standalone reproducer
 that does not involve inline `.4byte` Saturn customs at all —
 pure intrinsics (`vle16 → vzext.vf2 → vse32`) at `-O2` exhibit the
 missing `vsetvli` transition. Cross-version testing on three
-Bootlin toolchains confirms the bug is **fixed in GCC 14.2.0 and
-15.1.0**, present only in GCC 13.x (13.2.0 tested). GCC 14 picks
-`e32, m2` (the widest SEW in the chain) as the unified vtype and
-runs `vle16.v` under it correctly via baked-in EEW; GCC 13 picks
-the narrowest SEW and breaks `vzext.vf2`. Full report drafted at
-`paper/gcc_bug_report.md` as a GCC-13-backport request.
+Bootlin toolchains confirms the **pure-intrinsic** form is fixed
+in GCC 14.2.0 and 15.1.0, present only in GCC 13.x (13.2.0
+tested). GCC 14 picks `e32, m2` (the widest SEW in the chain) as
+the unified vtype and runs `vle16.v` under it correctly via
+baked-in EEW; GCC 13 picks the narrowest SEW and breaks
+`vzext.vf2`. **However**, the GCC 14.2 fix is *partial*: when an
+asm-volatile block that internally changes vtype precedes the
+widening chain (e.g., a custom-instruction macro that issues its
+own `vsetvli`), GCC 14.2 *still* fails to emit a vsetvli before
+the next intrinsic — confirmed during the Mo 8 step 4d-1
+intrinsic-rewrite work, where the Saturn `.4byte` vfconv macro
+followed by a `vzext.vf2 + vsll.vx` widen chain produced the
+same wrong-SEW miscompile (checksum NaN/Inf). Workaround in
+that case: explicit `asm volatile ("vsetvli zero, %0, e32, m2,
+ta, ma" :: "r"((size_t)(vl)))` before the widen — the explicit
+`__riscv_vsetvl_e32m2(vl)` intrinsic call gets DCE'd because its
+returned vl isn't used. Full report at
+`paper/gcc_bug_report.md`: Part 1 is the GCC-13 backport
+request, Part 2 documents the GCC-14.2 asm-volatile-boundary
+limitation.
 
 **A second, distinct GCC 14 -O2 issue** surfaced when we switched
 the project to GCC 14.2: the auto-vectorizer (enabled by default
