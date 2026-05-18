@@ -33,16 +33,16 @@ This project lives in three repositories that must be cloned together
 
 | Repo | Contents | URL |
 |---|---|---|
-| Main (this repo) | RTL + paper + microbenches + Exo schedule | `<TODO_MAIN_URL>` |
-| Exo fork | `src/exo/platforms/saturn_rvv.py` with 4 Saturn customs + 10 standard-RVV helpers + scheduling pass | `<TODO_EXO_URL>` |
-| gem5 fork | `src/arch/riscv/isa/decoder.isa` + `cpu/o3/FuncUnitConfig.py` patches for the 4 Saturn customs | `<TODO_GEM5_URL>` |
+| Main (this repo) | RTL + paper + microbenches + Exo schedule | `git@github.com:noyaboy/precision-routing-rvv-fa.git` |
+| Exo fork | `src/exo/platforms/saturn_rvv.py` with 4 Saturn customs + 10 standard-RVV helpers + scheduling pass | `git@github.com:noyaboy/exo-saturn-rvv.git` |
+| gem5 fork | `src/arch/riscv/isa/decoder.isa` + `cpu/o3/FuncUnitConfig.py` patches for the 4 Saturn customs | `git@github.com:noyaboy/gem5-saturn-fu.git` |
 
 Clone layout (sibling directories of the main repo):
 
 ```bash
-git clone <TODO_MAIN_URL> riscv && cd riscv
-git clone <TODO_EXO_URL>  exo
-git clone <TODO_GEM5_URL> gem5
+git clone git@github.com:noyaboy/precision-routing-rvv-fa.git riscv && cd riscv
+git clone git@github.com:noyaboy/exo-saturn-rvv.git  exo
+git clone git@github.com:noyaboy/gem5-saturn-fu.git gem5
 ```
 
 ## Layout
