@@ -9,6 +9,10 @@ spike-src/
 # Toolchains + downloads (regeneratable)
 install/
 models/
+datasets/
+
+# Local Claude Code harness state (per-user)
+.claude/
 
 # Build outputs + sim runs (regeneratable)
 # /build/ is anchored to the top-level llama.cpp/chipyard build dir; subdir
