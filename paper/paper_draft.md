@@ -245,16 +245,16 @@ routing pass that emits the §6 kernel (§5).
 
 LLM decode is memory-bandwidth-bound on edge hardware. Each
 generated token reads the *entire* KV cache once: for Llama-3.2-1B
-(24 layers, n_kv_heads = 8 GQA, head_dim = 64) at 2 K context that
-is `24 layers × 2 (K+V) × 8 heads × 64 dims × 2 bytes (FP16) ×
-2048 tokens = 96 MiB` of DRAM traffic per generated token at FP16.
-At 8 K context the per-token KV read grows to 384 MiB. NVFP4 K/V
+(16 layers, n_kv_heads = 8 GQA, head_dim = 64) at 2 K context that
+is `16 layers × 2 (K+V) × 8 heads × 64 dims × 2 bytes (FP16) ×
+2048 tokens = 64 MiB` of DRAM traffic per generated token at FP16.
+At 8 K context the per-token KV read grows to 256 MiB. NVFP4 K/V
 storage (4 bits/element + 8-bit per-block-16 E4M3 scale = 4.5 bits
 effective per element) drops the per-layer per-token KV traffic
 from 2048 B to 576 B — a **3.56× analytical reduction**, matching
 §2.3 and well above any plausible BW-reduction threshold. At a target throughput of, say, 10 tok/s, the FP16 path alone
-needs ~960 MB/s of sustained DRAM bandwidth just for the KV cache;
-the NVFP4 path drops that to ~270 MB/s — a meaningful gain at any
+needs ~640 MB/s of sustained DRAM bandwidth just for the KV cache;
+the NVFP4 path drops that to ~180 MB/s — a meaningful gain at any
 memory subsystem, but visible as a *cycle* reduction only when the
 compute side is already memory-bound. Whether that condition holds
 depends on per-cycle compute throughput of the target core: a

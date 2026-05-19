@@ -59,7 +59,7 @@ Memory's earlier note had "FP8 softmax accum." **Reject this.** Reasoning:
 
 ## Memory-bandwidth analysis (Mo 2 quantitative target)
 
-Llama-3.2-1B parameters (24 layers, n_kv_heads=8 [GQA], head_dim=64):
+Llama-3.2-1B parameters (16 layers, n_kv_heads=8 [GQA], head_dim=64; verified 2026-05-19 against HF config.json):
 - KV cache size per layer per token: 2 × 8 × 64 = 1024 bytes at FP16, 256 bytes at NVFP4 + 64 bytes scale (block 16) = 320 bytes effective.
 - Effective KV compression vs FP16: 1024 / 320 ≈ **3.2× memory + bandwidth reduction**.
 - For decode (memory-bound on KV cache reads): theoretical decode speedup ≈ 3.2× if 100% memory-bound.
